@@ -21,10 +21,12 @@
 package v1alpha1
 
 import (
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 	meshproto "github.com/apache/dubbo-admin/api/mesh/v1alpha1"
+	"github.com/apache/dubbo-admin/pkg/core/logger"
 	coremodel "github.com/apache/dubbo-admin/pkg/core/resource/model"
+	"google.golang.org/protobuf/proto"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 )
 
 // +kubebuilder:object:root=true
@@ -33,7 +35,7 @@ import (
 const DynamicConfigKind coremodel.ResourceKind = "DynamicConfig"
 
 func init() {
-	coremodel.RegisterResourceKind(DynamicConfigKind)
+	coremodel.RegisterResourceSchema(DynamicConfigKind, NewDynamicConfigResource)
 }
 
 type DynamicConfigResource struct {
@@ -83,17 +85,50 @@ func (r *DynamicConfigResource) ResourceMeta() metav1.ObjectMeta {
 func (r *DynamicConfigResource) ResourceSpec() coremodel.ResourceSpec {
 	return r.Spec
 }
+func (r *DynamicConfigResource) DeepCopyObject() k8sruntime.Object {
+	if r == nil {
+		return nil
+	}
 
-func NewDynamicConfigResource(name string, mesh string, apiVersion string) *DynamicConfigResource {
+	out := &DynamicConfigResource{
+		TypeMeta: r.TypeMeta,
+		Mesh:     r.Mesh,
+		Status:   r.Status,
+	}
+
+	r.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
+
+	if r.Spec != nil {
+		spec, ok := proto.Clone(r.Spec).(*meshproto.DynamicConfig)
+		if !ok {
+			logger.Warnf("failed to clone spec %v, spec is not conformed to %s", r.Spec, r.ResourceKind())
+			return out
+		}
+		out.Spec = spec
+	}
+
+	return out
+}
+
+func NewDynamicConfigResourceWithAttributes(name string, mesh string) *DynamicConfigResource {
 	return &DynamicConfigResource{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       string(DynamicConfigKind),
-			APIVersion: apiVersion,
+			APIVersion: "v1alpha1",
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   name,
 			Labels: map[string]string{},
 		},
 		Mesh: mesh,
+	}
+}
+
+func NewDynamicConfigResource() coremodel.Resource {
+	return &DynamicConfigResource{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       string(DynamicConfigKind),
+			APIVersion: "v1alpha1",
+		},
 	}
 }
