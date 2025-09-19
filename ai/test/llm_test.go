@@ -2,7 +2,9 @@ package test
 
 import (
 	"context"
+	"dubbo-admin-ai/agent/react"
 	"dubbo-admin-ai/internal/manager"
+	"dubbo-admin-ai/plugins/dashscope"
 	"fmt"
 	"log"
 	"testing"
@@ -39,11 +41,10 @@ func defineWeatherFlow(g *genkit.Genkit) *core.Flow[WeatherInput, string, struct
 }
 
 func TestTextGeneration(t *testing.T) {
+	manager.Init(dashscope.Qwen3.Key(), nil)
+	_ = react.Create(manager.GetRegistry())
 	ctx := context.Background()
-	g, err := manager.GetGlobalGenkit()
-	if err != nil {
-		t.Fatalf("failed to initialize genkit: %v", err)
-	}
+	g := manager.GetRegistry()
 
 	resp, err := genkit.GenerateText(ctx, g, ai.WithPrompt("Hello, Who are you?"))
 	if err != nil {
@@ -55,11 +56,10 @@ func TestTextGeneration(t *testing.T) {
 }
 
 func TestWeatherFlowRun(t *testing.T) {
+	manager.Init(dashscope.Qwen3.Key(), nil)
+	_ = react.Create(manager.GetRegistry())
 	ctx := context.Background()
-	g, err := manager.GetGlobalGenkit()
-	if err != nil {
-		t.Fatalf("failed to initialize genkit: %v", err)
-	}
+	g := manager.GetRegistry()
 
 	flow := defineWeatherFlow(g)
 	flow.Run(ctx, WeatherInput{Location: "San Francisco"})
