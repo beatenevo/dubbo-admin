@@ -15,11 +15,34 @@
  * limitations under the License.
  */
 
-package v1alpha1
+package index
 
-func (x *Zone) IsEnabled() bool {
-	if x.Enabled == nil {
-		return true
+import (
+	"reflect"
+
+	"k8s.io/client-go/tools/cache"
+
+	"github.com/apache/dubbo-admin/pkg/common/errors"
+	meshresource "github.com/apache/dubbo-admin/pkg/core/resource/apis/mesh/v1alpha1"
+)
+
+const (
+	ByServiceProviderAppName = "idx_service_provider_app_name"
+)
+
+func init() {
+	RegisterIndexers(meshresource.ServiceProviderMetadataKind, map[string]cache.IndexFunc{
+		ByServiceProviderAppName: byServiceProviderAppName,
+	})
+}
+
+func byServiceProviderAppName(obj interface{}) ([]string, error) {
+	metadata, ok := obj.(*meshresource.ServiceProviderMetadataResource)
+	if !ok {
+		return nil, errors.NewAssertionError(meshresource.ServiceProviderMetadataKind, reflect.TypeOf(obj))
 	}
-	return x.Enabled.GetValue()
+	if metadata.Spec == nil {
+		return []string{}, nil
+	}
+	return []string{metadata.Spec.ProviderAppName}, nil
 }

@@ -21,16 +21,14 @@
 package v1alpha1
 
 import (
-	meshproto "github.com/apache/dubbo-admin/api/mesh/v1alpha1"
-	"github.com/apache/dubbo-admin/pkg/core/logger"
-	coremodel "github.com/apache/dubbo-admin/pkg/core/resource/model"
 	"google.golang.org/protobuf/proto"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
-)
 
-// +kubebuilder:object:root=true
-// +kubebuilder:resource:categories=dubbo,scope=Namespaced
+	meshproto "github.com/apache/dubbo-admin/api/mesh/v1alpha1"
+	"github.com/apache/dubbo-admin/pkg/core/logger"
+	coremodel "github.com/apache/dubbo-admin/pkg/core/resource/model"
+)
 
 const ServiceKind coremodel.ResourceKind = "Service"
 
@@ -39,17 +37,17 @@ func init() {
 }
 
 type ServiceResource struct {
-	metav1.TypeMeta   `json:",inline"`
+	metav1.TypeMeta `json:",inline"`
+
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
 	// Mesh is the name of the dubbo mesh this resource belongs to.
 	// It may be omitted for cluster-scoped resources.
-	//
-	// +kubebuilder:validation:Optional
 	Mesh string `json:"mesh,omitempty"`
+
 	// Spec is the specification of the Dubbo Service resource.
-	// +kubebuilder:validation:Optional
 	Spec *meshproto.Service `json:"spec,omitempty"`
+
 	// Status is the status of the Dubbo Service resource.
 	Status ServiceResourceStatus `json:"status,omitempty"`
 }
@@ -58,8 +56,6 @@ type ServiceResourceStatus struct {
 	// define resource-specific status here
 }
 
-// +kubebuilder:object:root=true
-// +kubebuilder:resource:scope=Cluster
 type ServiceResourceList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`

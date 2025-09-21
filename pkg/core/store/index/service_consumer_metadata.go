@@ -15,43 +15,34 @@
  * limitations under the License.
  */
 
-package generic
+package index
 
 import (
-	"time"
+	"reflect"
 
-	"google.golang.org/protobuf/proto"
+	"k8s.io/client-go/tools/cache"
+
+	"github.com/apache/dubbo-admin/pkg/common/errors"
+	meshresource "github.com/apache/dubbo-admin/pkg/core/resource/apis/mesh/v1alpha1"
 )
 
-func AllSubscriptions[S Subscription, T interface{ GetSubscriptions() []S }](t T) []Subscription {
-	var subs []Subscription
-	for _, s := range t.GetSubscriptions() {
-		subs = append(subs, s)
+const (
+	ByServiceConsumerAppName = "idx_service_consumer_app_name"
+)
+
+func init() {
+	RegisterIndexers(meshresource.ServiceConsumerMetadataKind, map[string]cache.IndexFunc{
+		ByServiceConsumerAppName: byServiceConsumerAppName,
+	})
+}
+
+func byServiceConsumerAppName(obj interface{}) ([]string, error) {
+	metadata, ok := obj.(*meshresource.ServiceConsumerMetadataResource)
+	if !ok {
+		return nil, errors.NewAssertionError(meshresource.ServiceConsumerMetadataKind, reflect.TypeOf(obj).Name())
 	}
-	return subs
-}
-
-func GetSubscription[S Subscription, T interface{ GetSubscriptions() []S }](t T, id string) Subscription {
-	for _, s := range t.GetSubscriptions() {
-		if s.GetId() == id {
-			return s
-		}
+	if metadata == nil {
+		return []string{}, nil
 	}
-	return nil
-}
-
-type Insight interface {
-	proto.Message
-	IsOnline() bool
-	GetSubscription(id string) Subscription
-	AllSubscriptions() []Subscription
-	UpdateSubscription(Subscription) error
-}
-
-type Subscription interface {
-	proto.Message
-	GetId() string
-	GetGeneration() uint32
-	IsOnline() bool
-	SetDisconnectTime(time time.Time)
+	return []string{metadata.Spec.ConsumerAppName}, nil
 }

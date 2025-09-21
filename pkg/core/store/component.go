@@ -23,7 +23,12 @@ import (
 
 	coremodel "github.com/apache/dubbo-admin/pkg/core/resource/model"
 	"github.com/apache/dubbo-admin/pkg/core/runtime"
+	"github.com/apache/dubbo-admin/pkg/core/store/index"
 )
+
+func init() {
+	runtime.RegisterComponent(newStoreComponent())
+}
 
 type Router interface {
 	ResourceRoute(coremodel.Resource) (ResourceStore, error)
@@ -42,6 +47,12 @@ var _ Component = &storeComponent{}
 type storeComponent struct {
 	// stores every resource corresponds to a ResourceStore
 	stores map[coremodel.ResourceKind]ManagedResourceStore
+}
+
+func newStoreComponent() *storeComponent {
+	return &storeComponent{
+		stores: make(map[coremodel.ResourceKind]ManagedResourceStore),
+	}
 }
 
 func (sc *storeComponent) Type() runtime.ComponentType {
@@ -72,7 +83,7 @@ func (sc *storeComponent) Init(ctx runtime.BuilderContext) error {
 	}
 	// 3. add indexers for each kind of store
 	for kind, store := range sc.stores {
-		indexers := IndexersRegistry().Indexers(kind)
+		indexers := index.IndexersRegistry().Indexers(kind)
 		if indexers == nil {
 			continue
 		}

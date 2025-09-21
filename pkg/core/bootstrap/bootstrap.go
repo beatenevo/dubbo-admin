@@ -23,8 +23,14 @@ import (
 	"github.com/pkg/errors"
 
 	"github.com/apache/dubbo-admin/pkg/config/app"
+	_ "github.com/apache/dubbo-admin/pkg/console"
+	_ "github.com/apache/dubbo-admin/pkg/core/discovery"
+	_ "github.com/apache/dubbo-admin/pkg/core/engine"
+	_ "github.com/apache/dubbo-admin/pkg/core/events"
 	"github.com/apache/dubbo-admin/pkg/core/logger"
+	_ "github.com/apache/dubbo-admin/pkg/core/manager"
 	"github.com/apache/dubbo-admin/pkg/core/runtime"
+	_ "github.com/apache/dubbo-admin/pkg/core/store"
 	"github.com/apache/dubbo-admin/pkg/diagnostics"
 )
 
@@ -41,11 +47,11 @@ func Bootstrap(appCtx context.Context, cfg app.AdminConfig) (runtime.Runtime, er
 	if err := initResourceStore(cfg, builder); err != nil {
 		return nil, err
 	}
-	// 2. initialize discovery engine
+	// 2. initialize discovery
 	if err := initializeResourceDiscovery(builder); err != nil {
 		return nil, err
 	}
-	// 3. initialize runtime engine
+	// 3. initialize engine
 	if err := initializeResourceEngine(builder); err != nil {
 		return nil, err
 	}

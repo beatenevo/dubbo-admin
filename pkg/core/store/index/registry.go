@@ -15,11 +15,12 @@
  * limitations under the License.
  */
 
-package store
+package index
 
 import (
-	"github.com/apache/dubbo-admin/pkg/core/resource/model"
 	"k8s.io/client-go/tools/cache"
+
+	"github.com/apache/dubbo-admin/pkg/core/resource/model"
 )
 
 var indexRegistry = newIndexRegistry()

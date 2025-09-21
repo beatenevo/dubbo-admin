@@ -23,16 +23,22 @@ import (
 
 	meshproto "github.com/apache/dubbo-admin/api/mesh/v1alpha1"
 	"github.com/apache/dubbo-admin/pkg/core/consts"
+	coremodel "github.com/apache/dubbo-admin/pkg/core/resource/model"
 )
 
 type SearchConditionRuleReq struct {
+	coremodel.PageReq
+
 	Keywords string `json:"keywords"`
-	PageReq
+}
+
+func (s *SearchConditionRuleReq) PageRequest() coremodel.PageReq {
+	return s.PageReq
 }
 
 func NewSearchConditionRuleReq() *SearchConditionRuleReq {
 	return &SearchConditionRuleReq{
-		PageReq: PageReq{PageSize: 15},
+		PageReq: coremodel.PageReq{PageSize: 15},
 	}
 }
 

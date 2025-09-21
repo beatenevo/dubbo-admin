@@ -21,75 +21,72 @@
 package v1alpha1
 
 import (
-	systemproto "github.com/apache/dubbo-admin/api/system/v1alpha1"
-	coremodel "github.com/apache/dubbo-admin/pkg/core/resource/model"
 	"google.golang.org/protobuf/proto"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+
+	meshproto "github.com/apache/dubbo-admin/api/mesh/v1alpha1"
+	"github.com/apache/dubbo-admin/pkg/core/logger"
+	coremodel "github.com/apache/dubbo-admin/pkg/core/resource/model"
 )
 
-// +kubebuilder:object:root=true
-// +kubebuilder:resource:categories=dubbo,scope=Cluster
-
-const ConfigKind coremodel.ResourceKind = "Config"
+const RuntimeInstanceKind coremodel.ResourceKind = "RuntimeInstance"
 
 func init() {
-	coremodel.RegisterResourceSchema(ConfigKind, NewConfigResource)
+	coremodel.RegisterResourceSchema(RuntimeInstanceKind, NewRuntimeInstanceResource)
 }
 
-type ConfigResource struct {
-	metav1.TypeMeta   `json:",inline"`
+type RuntimeInstanceResource struct {
+	metav1.TypeMeta `json:",inline"`
+
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
 	// Mesh is the name of the dubbo mesh this resource belongs to.
 	// It may be omitted for cluster-scoped resources.
-	//
-	// +kubebuilder:validation:Optional
 	Mesh string `json:"mesh,omitempty"`
-	// Spec is the specification of the Dubbo Config resource.
-	// +kubebuilder:validation:Optional
-	Spec *systemproto.Config `json:"spec,omitempty"`
-	// Status is the status of the Dubbo Config resource.
-	Status ConfigResourceStatus `json:"status,omitempty"`
+
+	// Spec is the specification of the Dubbo RuntimeInstance resource.
+	Spec *meshproto.RuntimeInstance `json:"spec,omitempty"`
+
+	// Status is the status of the Dubbo RuntimeInstance resource.
+	Status RuntimeInstanceResourceStatus `json:"status,omitempty"`
 }
 
-type ConfigResourceStatus struct {
+type RuntimeInstanceResourceStatus struct {
 	// define resource-specific status here
 }
 
-// +kubebuilder:object:root=true
-// +kubebuilder:resource:scope=Namespaced
-type ConfigResourceList struct {
+type RuntimeInstanceResourceList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []ConfigResource `json:"items"`
+	Items           []RuntimeInstanceResource `json:"items"`
 }
 
-func (r *ConfigResource) ResourceKind() coremodel.ResourceKind {
-	return ConfigKind
+func (r *RuntimeInstanceResource) ResourceKind() coremodel.ResourceKind {
+	return RuntimeInstanceKind
 }
 
-func (r *ConfigResource) MeshName() string {
+func (r *RuntimeInstanceResource) MeshName() string {
 	return r.Mesh
 }
 
-func (r *ConfigResource) ResourceKey() string {
+func (r *RuntimeInstanceResource) ResourceKey() string {
 	return coremodel.BuildResourceKey(r.Mesh, r.Name)
 }
 
-func (r *ConfigResource) ResourceMeta() metav1.ObjectMeta {
+func (r *RuntimeInstanceResource) ResourceMeta() metav1.ObjectMeta {
 	return r.ObjectMeta
 }
 
-func (r *ConfigResource) ResourceSpec() coremodel.ResourceSpec {
+func (r *RuntimeInstanceResource) ResourceSpec() coremodel.ResourceSpec {
 	return r.Spec
 }
-func (r *ConfigResource) DeepCopyObject() k8sruntime.Object {
+func (r *RuntimeInstanceResource) DeepCopyObject() k8sruntime.Object {
 	if r == nil {
 		return nil
 	}
 
-	out := &ConfigResource{
+	out := &RuntimeInstanceResource{
 		TypeMeta: r.TypeMeta,
 		Mesh:     r.Mesh,
 		Status:   r.Status,
@@ -98,16 +95,21 @@ func (r *ConfigResource) DeepCopyObject() k8sruntime.Object {
 	r.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
 
 	if r.Spec != nil {
-		out.Spec = proto.Clone(r.Spec).(*systemproto.Config)
+		spec, ok := proto.Clone(r.Spec).(*meshproto.RuntimeInstance)
+		if !ok {
+			logger.Warnf("failed to clone spec %v, spec is not conformed to %s", r.Spec, r.ResourceKind())
+			return out
+		}
+		out.Spec = spec
 	}
 
 	return out
 }
 
-func NewConfigResourceWithAttributes(name string, mesh string) *ConfigResource {
-	return &ConfigResource{
+func NewRuntimeInstanceResourceWithAttributes(name string, mesh string) *RuntimeInstanceResource {
+	return &RuntimeInstanceResource{
 		TypeMeta: metav1.TypeMeta{
-			Kind:       string(ConfigKind),
+			Kind:       string(RuntimeInstanceKind),
 			APIVersion: "v1alpha1",
 		},
 		ObjectMeta: metav1.ObjectMeta{
@@ -118,10 +120,10 @@ func NewConfigResourceWithAttributes(name string, mesh string) *ConfigResource {
 	}
 }
 
-func NewConfigResource() coremodel.Resource {
-	return &ConfigResource{
+func NewRuntimeInstanceResource() coremodel.Resource {
+	return &RuntimeInstanceResource{
 		TypeMeta: metav1.TypeMeta{
-			Kind:       string(ConfigKind),
+			Kind:       string(RuntimeInstanceKind),
 			APIVersion: "v1alpha1",
 		},
 	}
