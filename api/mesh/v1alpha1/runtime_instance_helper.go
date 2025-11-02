@@ -15,17 +15,12 @@
  * limitations under the License.
  */
 
-package bootstrap
+package v1alpha1
 
-// import all components registered by init function
-import (
-	_ "github.com/apache/dubbo-admin/pkg/console"
-	_ "github.com/apache/dubbo-admin/pkg/core/discovery"
-	_ "github.com/apache/dubbo-admin/pkg/core/engine"
-	_ "github.com/apache/dubbo-admin/pkg/core/events"
-	_ "github.com/apache/dubbo-admin/pkg/core/manager"
-	_ "github.com/apache/dubbo-admin/pkg/core/store"
-	_ "github.com/apache/dubbo-admin/pkg/discovery/mock"
-	_ "github.com/apache/dubbo-admin/pkg/engine/kubernetes"
-	_ "github.com/apache/dubbo-admin/pkg/store/memory"
+const (
+	LivenessProbe  = "liveness"
+	ReadinessProbe = "readiness"
+	StartupProbe   = "startup"
 )
+
+const InstanceTerminating = "Terminating"

@@ -43,6 +43,17 @@ type Informer interface {
 	// Adding event handlers to already stopped informers is not possible.
 	// An informer already stopped will never be started again.
 	IsStopped() bool
+
+	// SetTransform The TransformFunc is called for each object which is about to be stored.
+	//
+	// This function is intended for you to take the opportunity to
+	// remove, transform, or normalize fields. One use case is to strip unused
+	// metadata fields out of objects to save on RAM cost.
+	//
+	// Must be set before starting the informer.
+	//
+	// Please see the comment on TransformFunc for more details.
+	SetTransform(handler cache.TransformFunc) error
 }
 
 // Options configures an informer.
@@ -91,13 +102,11 @@ type informer struct {
 	transform cache.TransformFunc
 }
 
-func NewInformerWithOptions(lw cache.ListerWatcher, emitter events.Emitter, store store.ResourceStore,
-	exampleObject runtime.Object, options Options) Informer {
+func NewInformerWithOptions(lw cache.ListerWatcher, emitter events.Emitter, store store.ResourceStore, options Options) Informer {
 	return &informer{
 		indexer:           store,
 		listerWatcher:     lw,
 		emitter:           emitter,
-		objectType:        exampleObject,
 		resyncCheckPeriod: options.ResyncPeriod,
 	}
 }
@@ -123,6 +132,17 @@ func (s *informer) SetTransform(handler cache.TransformFunc) error {
 	}
 
 	s.transform = handler
+	return nil
+}
+
+func (s *informer) SetObjectType(objectType runtime.Object) error {
+	s.startedLock.Lock()
+	defer s.startedLock.Unlock()
+
+	if s.started {
+		return fmt.Errorf("informer has already started")
+	}
+	s.objectType = objectType
 	return nil
 }
 

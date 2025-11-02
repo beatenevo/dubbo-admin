@@ -21,6 +21,8 @@
 package v1alpha1
 
 import (
+	"encoding/json"
+
 	"google.golang.org/protobuf/proto"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
@@ -45,8 +47,8 @@ type ServiceProviderMetadataResource struct {
 	// It may be omitted for cluster-scoped resources.
 	Mesh string `json:"mesh,omitempty"`
 
-	// Spec is the specification of the Dubbo ServiceProviderMetaData resource.
-	Spec *meshproto.ServiceProviderMetaData `json:"spec,omitempty"`
+	// Spec is the specification of the Dubbo ServiceProviderMetadata resource.
+	Spec *meshproto.ServiceProviderMetadata `json:"spec,omitempty"`
 
 	// Status is the status of the Dubbo ServiceProviderMetadata resource.
 	Status ServiceProviderMetadataResourceStatus `json:"status,omitempty"`
@@ -95,7 +97,7 @@ func (r *ServiceProviderMetadataResource) DeepCopyObject() k8sruntime.Object {
 	r.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
 
 	if r.Spec != nil {
-		spec, ok := proto.Clone(r.Spec).(*meshproto.ServiceProviderMetaData)
+		spec, ok := proto.Clone(r.Spec).(*meshproto.ServiceProviderMetadata)
 		if !ok {
 			logger.Warnf("failed to clone spec %v, spec is not conformed to %s", r.Spec, r.ResourceKind())
 			return out
@@ -104,6 +106,15 @@ func (r *ServiceProviderMetadataResource) DeepCopyObject() k8sruntime.Object {
 	}
 
 	return out
+}
+
+func (r *ServiceProviderMetadataResource) String() string {
+	jsonStr, err := json.Marshal(r)
+	if err != nil {
+		logger.Errorf("failed to encode ServiceProviderMetadataResource: %s to json, err: %s", r.ResourceKey(), err)
+		return ""
+	}
+	return string(jsonStr)
 }
 
 func NewServiceProviderMetadataResourceWithAttributes(name string, mesh string) *ServiceProviderMetadataResource {
