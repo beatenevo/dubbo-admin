@@ -15,18 +15,9 @@
  * limitations under the License.
  */
 
-package bizerror
+package model
 
-import (
-	"fmt"
-)
-
-func NewAssertionError(expected, actual interface{}) Error {
-	return NewBizError(UnknownError, fmt.Sprintf("type assertion error, expected:%v, actual:%v", expected, actual))
-}
-func NewUnauthorizedError() Error {
-	return NewBizError(Unauthorized, "no access, please login")
-}
-func MeshNotFoundError(mesh string) Error {
-	return NewBizError(UnknownError, fmt.Sprintf("mesh of name %s is not found", mesh))
+type MeshResp struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
 }

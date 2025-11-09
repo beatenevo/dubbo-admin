@@ -15,18 +15,27 @@
  * limitations under the License.
  */
 
-package bizerror
+package util
 
 import (
-	"fmt"
+	"errors"
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+
+	"github.com/apache/dubbo-admin/pkg/common/bizerror"
+	"github.com/apache/dubbo-admin/pkg/console/model"
 )
 
-func NewAssertionError(expected, actual interface{}) Error {
-	return NewBizError(UnknownError, fmt.Sprintf("type assertion error, expected:%v, actual:%v", expected, actual))
+func HandleServiceError(ctx *gin.Context, err error) {
+	var e bizerror.Error
+	if !errors.As(err, &e) {
+		e = bizerror.NewBizError(bizerror.UnknownError, err.Error())
+	}
+	ctx.JSON(http.StatusOK, model.NewBizErrorResp(e))
 }
-func NewUnauthorizedError() Error {
-	return NewBizError(Unauthorized, "no access, please login")
-}
-func MeshNotFoundError(mesh string) Error {
-	return NewBizError(UnknownError, fmt.Sprintf("mesh of name %s is not found", mesh))
+
+func HandleArgumentError(ctx *gin.Context, err error) {
+	e := bizerror.NewBizError(bizerror.InvalidArgument, err.Error())
+	ctx.JSON(http.StatusOK, model.NewBizErrorResp(e))
 }

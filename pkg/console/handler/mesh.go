@@ -15,18 +15,29 @@
  * limitations under the License.
  */
 
-package bizerror
+package handler
 
 import (
-	"fmt"
+	"net/http"
+
+	"github.com/duke-git/lancet/v2/slice"
+	"github.com/gin-gonic/gin"
+
+	discoverycfg "github.com/apache/dubbo-admin/pkg/config/discovery"
+	consolectx "github.com/apache/dubbo-admin/pkg/console/context"
+	"github.com/apache/dubbo-admin/pkg/console/model"
 )
 
-func NewAssertionError(expected, actual interface{}) Error {
-	return NewBizError(UnknownError, fmt.Sprintf("type assertion error, expected:%v, actual:%v", expected, actual))
-}
-func NewUnauthorizedError() Error {
-	return NewBizError(Unauthorized, "no access, please login")
-}
-func MeshNotFoundError(mesh string) Error {
-	return NewBizError(UnknownError, fmt.Sprintf("mesh of name %s is not found", mesh))
+// ListMeshes list all meshes(discoveries) defined in config
+func ListMeshes(ctx consolectx.Context) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		discoveries := ctx.Config().Discovery
+		meshes := slice.Map(discoveries, func(index int, item *discoverycfg.Config) model.MeshResp {
+			return model.MeshResp{
+				Name: item.Name,
+				Type: string(item.Type),
+			}
+		})
+		c.JSON(http.StatusOK, model.NewSuccessResp(meshes))
+	}
 }
