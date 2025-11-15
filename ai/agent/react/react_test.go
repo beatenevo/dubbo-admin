@@ -1,18 +1,17 @@
 package react
 
 import (
-	"dubbo-admin-ai/agent"
-	"dubbo-admin-ai/config"
-	"dubbo-admin-ai/internal/manager"
-	"dubbo-admin-ai/internal/memory"
-	"dubbo-admin-ai/internal/tools"
-	"dubbo-admin-ai/plugins/dashscope"
-	"dubbo-admin-ai/schema"
 	"encoding/json"
 	"fmt"
 	"testing"
 
-	"github.com/firebase/genkit/go/core"
+	"dubbo-admin-ai/agent"
+	"dubbo-admin-ai/config"
+	"dubbo-admin-ai/manager"
+	"dubbo-admin-ai/memory"
+	"dubbo-admin-ai/plugins/dashscope"
+	"dubbo-admin-ai/schema"
+	"dubbo-admin-ai/tools"
 )
 
 var (
@@ -21,27 +20,7 @@ var (
 )
 
 func init() {
-	manager.Init(dashscope.Qwen3.Key(), manager.PrettyLogger())
-	reActAgent = Create(manager.GetRegistry())
-}
-
-func TestThinking(t *testing.T) {
-	agentInput := ThinkIn{
-		Content: "我的微服务 order-service 运行缓慢，请帮助我诊断原因",
-	}
-
-	streamChan := make(chan *schema.StreamChunk, config.STAGE_CHANNEL_BUFFER_SIZE)
-	outputChan := make(chan schema.Schema, config.STAGE_CHANNEL_BUFFER_SIZE)
-	defer func() {
-		close(streamChan)
-		close(outputChan)
-	}()
-	resp, err := reActAgent.orchestrator.RunStage(chatHistoryCtx, agent.StreamThinkFlowName, agentInput, streamChan, outputChan)
-	if err != nil {
-		t.Fatalf("failed to run thinking flow: %v", err)
-	}
-
-	fmt.Println(resp)
+	reActAgent, _ = Create(manager.Registry(dashscope.Qwen3_coder.Key(), config.PROJECT_ROOT+"/.env", manager.ProductionLogger()))
 }
 
 func TestThinkWithToolReq(t *testing.T) {
@@ -65,20 +44,14 @@ func TestThinkWithToolReq(t *testing.T) {
 			},
 		},
 	}
+	channels := agent.NewChannels(config.STAGE_CHANNEL_BUFFER_SIZE)
 
-	streamChan := make(chan *schema.StreamChunk, config.STAGE_CHANNEL_BUFFER_SIZE)
-	outputChan := make(chan schema.Schema, config.STAGE_CHANNEL_BUFFER_SIZE)
 	defer func() {
-		close(streamChan)
-		close(outputChan)
+		channels.Close()
+		channels.Close()
 	}()
-	resp, err := reActAgent.orchestrator.RunStage(chatHistoryCtx, agent.StreamThinkFlowName, input, streamChan, outputChan)
+	reActAgent.orchestrator.RunStage(chatHistoryCtx, agent.ThinkFlowName, input, channels)
 
-	if err != nil {
-		t.Fatalf("failed to run thinking flow: %v", err)
-	}
-
-	fmt.Println(resp)
 }
 
 func TestAct(t *testing.T) {
@@ -120,71 +93,63 @@ func TestAct(t *testing.T) {
 		t.Fatalf("failed to unmarshal actInJson: %v", err)
 	}
 
-	actOuts, err := reActAgent.orchestrator.RunStage(chatHistoryCtx, agent.ActFlowName, actIn, nil, nil)
-	resp := actOuts
-	if err != nil {
-		t.Fatalf("failed to run act flow: %v", err)
-	}
-	if resp == nil {
-		t.Fatal("expected non-nil response")
-	}
+	reActAgent.orchestrator.RunStage(chatHistoryCtx, agent.ActFlowName, actIn, nil)
+	// resp := actOuts
+	// if err != nil {
+	// 	t.Fatalf("failed to run act flow: %v", err)
+	// }
+	// if resp == nil {
+	// 	t.Fatal("expected non-nil response")
+	// }
 
 }
+
+// func TestIntent(t *testing.T) {
+// 	userInput := schema.UserInput{
+// 		Content: "我的微服务 order-service 运行缓慢，请帮助我诊断原因",
+// 	}
+
+// 	channels := agent.NewChannels(config.STAGE_CHANNEL_BUFFER_SIZE)
+// 	go reActAgent.orchestrator.RunStage(chatHistoryCtx, agent.IntentFlowName, userInput, channels)
+
+// 	for !channels.Closed() {
+// 		select {
+// 		case stream := <-channels.UserRespChan:
+// 			fmt.Print(stream.Text)
+
+// 		case flowData := <-channels.FlowChan:
+// 			fmt.Println(flowData)
+// 		}
+// 	}
+// }
 
 func TestAgent(t *testing.T) {
-	agentInput := ThinkIn{
+	agentInput := schema.UserInput{
 		Content: "我的微服务 order-service 运行缓慢，请帮助我诊断原因",
 	}
-
-	streamChan, outputChan, err := reActAgent.Interact(agentInput)
-	if err != nil {
-		t.Fatalf("failed to run thinking flow: %v", err)
-	}
-
-	for {
+	channels := reActAgent.Interact(&agentInput, "session-test")
+	for !channels.Closed() {
 		select {
-		case chunk, ok := <-streamChan:
+		case err, ok := <-channels.ErrorChan:
 			if !ok {
-				streamChan = nil
+				channels.ErrorChan = nil
 				continue
 			}
-			fmt.Print(chunk.Chunk.Text())
-
-		case finalOutput, ok := <-outputChan:
-			if !ok {
-				outputChan = nil
-				continue
-			}
-			fmt.Printf("Final output: %+v\n", finalOutput)
-		default:
-			if streamChan == nil && outputChan == nil {
+			if err != nil {
+				t.Fatalf("agent interaction error: %v", err)
+				channels.Close()
 				return
 			}
+		case chunk, ok := <-channels.UserRespChan:
+			if !ok {
+				channels.UserRespChan = nil
+				continue
+			}
+			if chunk != nil {
+				fmt.Print(chunk.Text())
+			}
+		default:
 		}
 	}
-}
 
-func TestStreamThink(t *testing.T) {
-	manager.Init(dashscope.Qwen3.Key(), manager.PrettyLogger())
-	prompt := BuildThinkPrompt(manager.GetRegistry())
-	chatHistoryCtx := memory.NewMemoryContext(memory.ChatHistoryKey)
-
-	agentInput := ThinkIn{
-		Content: "我的微服务 order-service 运行缓慢，请帮助我诊断原因",
-	}
-
-	stream := streamThink(manager.GetRegistry(), prompt).Stream(chatHistoryCtx, agentInput)
-	stream(func(val *core.StreamingFlowValue[schema.Schema, schema.StreamChunk], err error) bool {
-		if err != nil {
-			fmt.Printf("Stream error: %v\n", err)
-			return false
-		}
-		if !val.Done {
-			fmt.Print(val.Stream.Chunk.Text())
-		} else if val.Output != nil {
-			fmt.Printf("Stream final output: %+v\n", val.Output)
-		}
-
-		return true
-	})
 }

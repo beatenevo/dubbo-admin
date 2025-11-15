@@ -50,3 +50,75 @@ func CopyFile(srcPath, dstPath string) error {
 
 	return nil
 }
+
+type Window[T any] struct {
+	limit int
+	begin int
+	end   int
+	data  []T
+}
+
+func NewWindow[T any](limit int) *Window[T] {
+	if limit <= 0 {
+		panic("limit must be positive")
+	}
+	return &Window[T]{
+		limit: limit,
+		data:  make([]T, limit+1),
+		begin: 0,
+		end:   0,
+	}
+}
+
+func (w *Window[T]) Push(elm T) bool {
+	if w.IsFull() {
+		return false
+	}
+	w.data[w.end] = elm
+	w.end++
+	return true
+}
+
+func (w *Window[T]) IsEmpty() bool {
+	return w.begin == w.end
+}
+
+func (w *Window[T]) IsFull() bool {
+	return w.end == w.limit
+}
+
+func (w *Window[T]) Pop() T {
+	if w.IsEmpty() {
+		panic("window is empty")
+	}
+	val := w.data[w.begin]
+	w.begin++
+	return val
+}
+
+func (w *Window[T]) Size() int {
+	return w.end - w.begin
+}
+
+func (w *Window[T]) Capacity() int {
+	return w.limit
+}
+
+func (w *Window[T]) GetAll() []T {
+	return w.data
+}
+
+func (w *Window[T]) GetCurData() T {
+	if w.IsEmpty() {
+		panic("window is empty")
+	}
+	return w.data[w.end-1]
+}
+
+func (w *Window[T]) GetWindow() []T {
+	return w.data[w.begin:w.end]
+}
+
+func (w *Window[T]) GetWindowBounds() (begin, end int) {
+	return w.begin, w.end
+}

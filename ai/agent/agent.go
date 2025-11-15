@@ -2,10 +2,12 @@ package agent
 
 import (
 	"context"
-	"dubbo-admin-ai/config"
-	"dubbo-admin-ai/internal/manager"
-	"dubbo-admin-ai/schema"
+	"errors"
 	"fmt"
+
+	"dubbo-admin-ai/config"
+	"dubbo-admin-ai/memory"
+	"dubbo-admin-ai/schema"
 
 	"github.com/firebase/genkit/go/core"
 )
@@ -20,97 +22,146 @@ type NormalFlow = *core.Flow[schema.Schema, schema.Schema, NoStream]
 type StreamFlow = *core.Flow[schema.Schema, schema.Schema, schema.StreamChunk]
 
 type StreamHandler = func(*core.StreamingFlowValue[schema.Schema, schema.StreamChunk], error) bool
+type StreamFunc = func(*Channels) StreamHandler
 
 const (
-	ThinkFlowName       string = "think"
-	StreamThinkFlowName string = "stream_think"
-	ActFlowName         string = "act"
-	ReActFlowName       string = "reAct"
+	IntentFlowName  string = "intent"
+	ThinkFlowName   string = "think"
+	ActFlowName     string = "act"
+	ObserveFlowName string = "observe"
+	ReActFlowName   string = "reAct"
 )
 
 type Agent interface {
-	Interact(schema.Schema) (schema.Schema, error)
+	Interact(*schema.UserInput, string) *Channels
+	GetMemory() *memory.History
 }
 
-// TODO: Use input/Output channel to support async execution
-type Stage struct {
-	flow          any
-	streamHandler StreamHandler
+type Channels struct {
+	closed bool
 
-	Input      schema.Schema
-	Output     schema.Schema
-	StreamChan chan *schema.StreamChunk
-	OutputChan chan schema.Schema
+	UserRespChan chan *schema.StreamFeedback
+	FlowChan     chan schema.Schema
+	ErrorChan    chan error
 }
 
-func NewStage(flow any, inputSchema schema.Schema, outputSchema schema.Schema) *Stage {
-	return &Stage{
-		flow:          flow,
-		streamHandler: nil,
-		Input:         inputSchema,
-		Output:        outputSchema,
-		// InputChan:     make(chan schema.Schema, config.STAGE_CHANNEL_BUFFER_SIZE),
-		// OutputChan:    make(chan schema.Schema, config.STAGE_CHANNEL_BUFFER_SIZE),
+func NewChannels(bufferSize int) *Channels {
+	return &Channels{
+		closed:       false,
+		UserRespChan: make(chan *schema.StreamFeedback, bufferSize),
+		FlowChan:     make(chan schema.Schema, bufferSize),
+		ErrorChan:    make(chan error, bufferSize),
 	}
 }
 
-func NewStreamStage(flow any, inputSchema schema.Schema, outputSchema schema.Schema, onStreaming func(*Stage, schema.StreamChunk) error, onDone func(*Stage, schema.Schema) error) (stage *Stage) {
+func (chans *Channels) Reset() {
+	chans.closed = false
+}
+
+func (chans *Channels) Close() {
+	chans.closed = true
+}
+
+func (chans *Channels) Closed() bool {
+	return chans.closed
+}
+
+func (chans *Channels) Destroy() {
+	close(chans.UserRespChan)
+	close(chans.FlowChan)
+	close(chans.ErrorChan)
+	chans = nil
+}
+
+type StageType int
+
+const (
+	BeforeLoop StageType = iota
+	InLoop
+	AfterLoop
+)
+
+type Stage struct {
+	flow       any
+	streamFunc StreamFunc
+	Type       StageType
+}
+
+func NewStage(flow any, t StageType) *Stage {
+	return &Stage{
+		flow:       flow,
+		streamFunc: nil,
+		Type:       t,
+	}
+}
+
+func NewStreamStage(flow any, t StageType, onStreaming func(*Channels, schema.StreamChunk) error, onDone func(*Channels, schema.Schema) error) (stage *Stage) {
 	if onStreaming == nil || onDone == nil {
 		panic("onStreaming, onDone and streamChan callbacks cannot be nil for streaming stage")
 	}
 
-	stage = NewStage(flow, inputSchema, outputSchema)
-	stage.streamHandler = func(val *core.StreamingFlowValue[schema.Schema, schema.StreamChunk], err error) bool {
-		if err != nil {
-			manager.GetLogger().Error("error", "err", err)
-			return false
-		}
-
-		if !val.Done {
-			if err := onStreaming(stage, val.Stream); err != nil {
-				manager.GetLogger().Error("Error when streaming", "err", err)
+	stage = NewStage(flow, t)
+	stage.streamFunc = func(channels *Channels) StreamHandler {
+		return func(val *core.StreamingFlowValue[schema.Schema, schema.StreamChunk], err error) bool {
+			if err != nil {
+				channels.ErrorChan <- err
 				return false
 			}
-		} else if val.Output != nil {
-			if err := onDone(stage, val.Output); err != nil {
-				manager.GetLogger().Error("Error when finalizing", "err", err)
-				return false
+			if !val.Done {
+				if err := onStreaming(channels, val.Stream); err != nil {
+					channels.ErrorChan <- err
+					return false
+				}
+			} else if val.Output != nil {
+				if err := onDone(channels, val.Output); err != nil {
+					channels.ErrorChan <- err
+					return false
+				}
 			}
+			return true
 		}
-
-		return true
 	}
-
 	return stage
 }
 
-func (s *Stage) Execute(ctx context.Context, streamChan chan *schema.StreamChunk, outputChan chan schema.Schema) (err error) {
+// Execute will receive an input and produce an output
+func (s *Stage) Execute(ctx context.Context, chans *Channels, input schema.Schema) error {
 	if value, ok := s.flow.(NormalFlow); ok {
-		s.Output, err = value.Run(ctx, s.Input)
+		output, err := value.Run(ctx, input)
+		if err != nil {
+			return fmt.Errorf("error when running normal flow: %w", err)
+		}
+		chans.FlowChan <- output
 	} else if value, ok := s.flow.(StreamFlow); ok {
-		if streamChan == nil || outputChan == nil || s.streamHandler == nil {
+		if chans == nil || s.streamFunc == nil {
 			return fmt.Errorf("stream handler and channels cannot be nil for stream flow")
 		}
-		s.StreamChan = streamChan
-		s.OutputChan = outputChan
-		value.Stream(ctx, s.Input)(s.streamHandler)
+		// the stream function will produce the output
+		value.Stream(ctx, input)(s.streamFunc(chans))
 	}
 
-	return err
+	return nil
 }
 
 type Orchestrator interface {
-	Run(context.Context, schema.Schema, chan *schema.StreamChunk, chan schema.Schema)
-	RunStage(context.Context, string, schema.Schema, chan *schema.StreamChunk, chan schema.Schema) (schema.Schema, error)
+	Run(context.Context, schema.Schema, *Channels) error
+	RunStage(context.Context, string, schema.Schema, *Channels) error
 }
 
 type OrderOrchestrator struct {
-	stages map[string]*Stage
-	order  []string
+	stages     map[string]*Stage
+	beforeLoop []string
+	loop       []string
+	afterLoop  []string
 }
 
+// The order of stages is the order in which they are executed
 func NewOrderOrchestrator(stages ...*Stage) *OrderOrchestrator {
 	stagesMap := make(map[string]*Stage, len(stages))
+	loop := make([]string, 0, len(stages))
+	beforeLoop := make([]string, 0, len(stages))
+	afterLoop := make([]string, 0, len(stages))
+
 	for _, stage := range stages {
 		// Get the flow name through interface method
 		var flowName string
@@ -120,75 +171,111 @@ func NewOrderOrchestrator(stages ...*Stage) *OrderOrchestrator {
 			flowName = sFlow.Name()
 		}
 		stagesMap[flowName] = stage
+		switch stage.Type {
+		case BeforeLoop:
+			beforeLoop = append(beforeLoop, flowName)
+		case InLoop:
+			loop = append(loop, flowName)
+		case AfterLoop:
+			afterLoop = append(afterLoop, flowName)
+		}
 	}
 
-	order := make([]string, 2)
-	order[0] = StreamThinkFlowName
-	order[1] = ActFlowName
-
 	return &OrderOrchestrator{
-		stages: stagesMap,
-		order:  order,
+		stages:     stagesMap,
+		loop:       loop,
+		beforeLoop: beforeLoop,
+		afterLoop:  afterLoop,
 	}
 }
 
-func (o *OrderOrchestrator) Run(ctx context.Context, userInput schema.Schema, streamChan chan *schema.StreamChunk, outputChan chan schema.Schema) {
+func (orchestrator *OrderOrchestrator) Run(ctx context.Context, input schema.Schema, chans *Channels) (err error) {
 	defer func() {
-		close(streamChan)
-		close(outputChan)
+		if err != nil {
+			chans.ErrorChan <- err
+		}
 	}()
-
 	// Use user initial input for the first round
-	if userInput == nil {
-		panic("userInput cannot be nil")
+	if input == nil {
+		return errors.New("userInput cannot be nil")
 	}
-	var input schema.Schema = userInput
+
+	for _, key := range orchestrator.beforeLoop {
+		curStage, ok := orchestrator.stages[key]
+		if !ok {
+			return fmt.Errorf("stage %s not found", key)
+		}
+
+		if err := curStage.Execute(ctx, chans, input); err != nil {
+			return fmt.Errorf("failed to execute stage %s: %w", key, err)
+		}
+		output := <-chans.FlowChan
+
+		input = output
+	}
+
 	// Iterate until reaching maximum iterations or status is Finished
+	var finalOutput schema.Observation
 Outer:
 	for range config.MAX_REACT_ITERATIONS {
-		for _, order := range o.order {
+		for _, order := range orchestrator.loop {
 			// Execute current stage
-			curStage, ok := o.stages[order]
+			curStage, ok := orchestrator.stages[order]
 			if !ok {
-				panic(fmt.Errorf("stage %s not found", order))
+				return fmt.Errorf("stage %s not found", order)
 			}
 
-			curStage.Input = input
-			if curStage.Input == nil {
-				panic(fmt.Errorf("stage %s input is nil", order))
+			if err := curStage.Execute(ctx, chans, input); err != nil {
+				return fmt.Errorf("failed to execute stage %s: %w", order, err)
 			}
-
-			if err := curStage.Execute(ctx, streamChan, outputChan); err != nil {
-				panic(fmt.Errorf("failed to execute stage %s: %w", order, err))
-			}
-
-			// Use current stage Output as next stage input
-			if curStage.Output == nil {
-				panic(fmt.Errorf("stage %s output is nil", order))
-			}
-			input = curStage.Output
+			output := <-chans.FlowChan
 
 			// Check if LLM returned final answer
-			switch curStage.Output.(type) {
-			case schema.ThinkOutput:
-				out := curStage.Output.(schema.ThinkOutput)
-				if out.Status == schema.Finished && out.FinalAnswer != "" {
+			if out, ok := output.(schema.Observation); ok {
+				if !out.Heartbeat && out.FinalAnswer != "" {
+					finalOutput = out
 					break Outer
 				}
 			}
+			// The output of current stage will be the input of the next stage
+			if val, ok := output.(schema.Observation); ok {
+				finalOutput = val
+			}
+			input = output
 		}
 	}
+	chans.UserRespChan <- schema.StreamFinal(&finalOutput)
+
+	for _, key := range orchestrator.afterLoop {
+		curStage, ok := orchestrator.stages[key]
+		if !ok {
+			return fmt.Errorf("stage %s not found", key)
+		}
+
+		if err := curStage.Execute(ctx, chans, input); err != nil {
+			return fmt.Errorf("failed to execute stage %s: %w", key, err)
+		}
+		output := <-chans.FlowChan
+
+		input = output
+	}
+
+	return nil
 }
 
-func (o *OrderOrchestrator) RunStage(ctx context.Context, key string, input schema.Schema, streamChan chan *schema.StreamChunk, outputChan chan schema.Schema) (output schema.Schema, err error) {
-	stage, ok := o.stages[key]
+func (orchestrator *OrderOrchestrator) RunStage(ctx context.Context, key string, input schema.Schema, chans *Channels) (err error) {
+	defer func() {
+		chans.Close()
+		if err != nil {
+			chans.ErrorChan <- err
+		}
+	}()
+	stage, ok := orchestrator.stages[key]
 	if !ok {
-		return nil, fmt.Errorf("stage %s not found", key)
+		return fmt.Errorf("stage %s not found", key)
 	}
-
-	stage.Input = input
-	if err = stage.Execute(ctx, streamChan, outputChan); err != nil {
-		return nil, err
+	if err := stage.Execute(ctx, chans, input); err != nil {
+		return fmt.Errorf("failed to execute stage %s: %w", key, err)
 	}
-	return stage.Output, nil
+	return nil
 }

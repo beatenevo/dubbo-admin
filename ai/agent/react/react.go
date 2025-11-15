@@ -2,19 +2,21 @@ package react
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"os"
 
 	"dubbo-admin-ai/agent"
 	"dubbo-admin-ai/config"
-	"dubbo-admin-ai/internal/manager"
-	"dubbo-admin-ai/internal/memory"
-	"dubbo-admin-ai/internal/tools"
+	"dubbo-admin-ai/manager"
+	"dubbo-admin-ai/memory"
 	"dubbo-admin-ai/schema"
-	"fmt"
-	"os"
+	"dubbo-admin-ai/tools"
 
 	"github.com/firebase/genkit/go/ai"
 	"github.com/firebase/genkit/go/core"
 	"github.com/firebase/genkit/go/genkit"
+	"github.com/openai/openai-go"
 )
 
 type ThinkIn = schema.ThinkInput
@@ -27,72 +29,202 @@ type ReActAgent struct {
 	registry     *genkit.Genkit
 	memoryCtx    context.Context
 	orchestrator agent.Orchestrator
+	channels     *agent.Channels
 }
 
-func Create(g *genkit.Genkit) *ReActAgent {
-	prompt := BuildThinkPrompt(g)
-	thinkStage := agent.NewStreamStage(
-		streamThink(g, prompt),
-		schema.ThinkInput{},
-		schema.ThinkOutput{},
-		func(stage *agent.Stage, chunk schema.StreamChunk) error {
-			if stage.StreamChan == nil {
-				return fmt.Errorf("streamChan is nil")
-			}
-			stage.StreamChan <- &chunk
-			return nil
-		},
-		func(stage *agent.Stage, output schema.Schema) error {
-			if stage.OutputChan == nil {
-				return fmt.Errorf("outputChan is nil")
-			}
-			stage.Output = output
-			stage.OutputChan <- output
-			return nil
-		},
-	)
-	actStage := agent.NewStage(act(g), schema.ThinkOutput{}, schema.ToolOutputs{})
+func onStreaming2User(channels *agent.Channels, chunk schema.StreamChunk) error {
+	if channels == nil {
+		return fmt.Errorf("channels is nil")
+	}
+	channels.UserRespChan <- schema.NewStreamFeedback(chunk.Chunk.Text())
+	return nil
+}
 
-	orchestrator := agent.NewOrderOrchestrator(thinkStage, actStage)
+func onOutput2Flow(channels *agent.Channels, output schema.Schema) error {
+	if channels == nil {
+		return fmt.Errorf("channels is nil")
+	}
+	channels.FlowChan <- output
+	channels.UserRespChan <- schema.StreamEnd()
+	return nil
+}
+
+func Create(g *genkit.Genkit) (*ReActAgent, error) {
+	var (
+		thinkPrompt    ai.Prompt
+		feedbackPrompt ai.Prompt
+		toolPrompt     ai.Prompt
+		observePrompt  ai.Prompt
+		err            error
+	)
+
+	memoryCtx := memory.NewMemoryContext(memory.ChatHistoryKey)
+	history, ok := memoryCtx.Value(memory.ChatHistoryKey).(*memory.History)
+	if !ok {
+		return nil, fmt.Errorf("failed to get history from context")
+	}
+	// Get Available Tools
+	var toolManagers []tools.ToolManager
+	// mcpToolManager, err := tools.NewMCPToolManager(g, config.MCP_HOST_NAME)
+	// if err != nil {
+	// 	return nil, fmt.Errorf("failed to create MCP tool manager: %v", err)
+	// }
+	toolManagers = append(toolManagers,
+		tools.NewMockToolManager(g),
+		tools.NewInternalToolManager(g, history),
+		// mcpToolManager,
+	)
+	toolRefs := tools.NewToolRegistry(toolManagers...).AllToolRefs()
+
+	// Build and Register ReAct think prompt
+	if thinkPrompt, err = buildThinkPrompt(g, toolRefs...); err != nil {
+		return nil, err
+	}
+	if feedbackPrompt, err = buildFeedBackPrompt(g); err != nil {
+		return nil, err
+	}
+	if toolPrompt, err = buildToolSelectionPrompt(g, toolRefs...); err != nil {
+		return nil, err
+	}
+	if observePrompt, err = buildObservePrompt(g); err != nil {
+		return nil, err
+	}
+
+	channels := agent.NewChannels(config.STAGE_CHANNEL_BUFFER_SIZE)
+
+	thinkStage := agent.NewStage(
+		think(g, thinkPrompt),
+		agent.InLoop,
+	)
+
+	actStage := agent.NewStage(
+		act(g, nil, toolPrompt),
+		agent.InLoop,
+	)
+	observerStage := agent.NewStreamStage(
+		observe(g, observePrompt, feedbackPrompt),
+		agent.InLoop,
+		onStreaming2User,
+		onOutput2Flow,
+	)
+
+	orchestrator := agent.NewOrderOrchestrator(thinkStage, actStage, observerStage)
 
 	return &ReActAgent{
 		registry:     g,
 		orchestrator: orchestrator,
-		memoryCtx:    memory.NewMemoryContext(memory.ChatHistoryKey),
-	}
+		memoryCtx:    memoryCtx,
+		channels:     channels,
+	}, nil
 }
 
-func (ra *ReActAgent) Interact(input schema.Schema) (chan *schema.StreamChunk, chan schema.Schema, error) {
-	streamChan := make(chan *schema.StreamChunk, config.STAGE_CHANNEL_BUFFER_SIZE)
-	outputChan := make(chan schema.Schema, config.STAGE_CHANNEL_BUFFER_SIZE)
+func (ra *ReActAgent) Interact(input *schema.UserInput, sessionID string) *agent.Channels {
+	ra.channels.Reset()
 	go func() {
-		ra.orchestrator.Run(ra.memoryCtx, input, streamChan, outputChan)
+		var (
+			err       error
+			inputJson []byte
+			in        schema.ThinkInput
+		)
+		in.UserInput = input
+		in.SessionID = sessionID
+
+		// Add user input to history
+		ra.memoryCtx = context.WithValue(ra.memoryCtx, memory.SessionIDKey, sessionID)
+		history, ok := ra.memoryCtx.Value(memory.ChatHistoryKey).(*memory.History)
+		if !ok {
+			err = fmt.Errorf("failed to get history from context")
+			ra.channels.ErrorChan <- err
+		}
+
+		inputJson, err = json.Marshal(in)
+		if err != nil {
+			ra.channels.ErrorChan <- err
+		}
+		inputMsg := ai.NewUserMessage(ai.NewJSONPart(string(inputJson)))
+		history.AddHistory(sessionID, inputMsg)
+
+		err = ra.orchestrator.Run(ra.memoryCtx, in, ra.channels)
+		if err != nil {
+			ra.channels.ErrorChan <- err
+		}
+		ra.channels.Close()
+		history.NextTurn(sessionID)
 	}()
-	return streamChan, outputChan, nil
+	return ra.channels
 }
 
-func BuildThinkPrompt(registry *genkit.Genkit) ai.Prompt {
-	// Load system prompt from filesystem
-	data, err := os.ReadFile(config.PROMPT_DIR_PATH + "/agentSystem.prompt")
+func (ra *ReActAgent) GetMemory() *memory.History {
+	h, err := memory.GetHistory(ra.memoryCtx, memory.ChatHistoryKey)
 	if err != nil {
-		panic(fmt.Errorf("failed to read agentSystem prompt: %w", err))
+		return nil
+	}
+	return h
+}
+
+func buildThinkPrompt(registry *genkit.Genkit, tools ...ai.ToolRef) (ai.Prompt, error) {
+	// Load system prompt from filesystem
+	data, err := os.ReadFile(config.PROMPT_DIR_PATH + "/agentThink.txt")
+	if err != nil {
+		return nil, fmt.Errorf("failed to read agentThink prompt: %w", err)
 	}
 	systemPromptText := string(data)
 
-	// Build and Register ReAct think prompt
-	mockToolManager := tools.NewMockToolManager(registry)
-	toolRefs, err := mockToolManager.AllToolRefs()
+	toolsJson, err := json.Marshal(tools)
 	if err != nil {
-		panic(fmt.Errorf("failed to get mock mock_tools: %v", err))
+		return nil, fmt.Errorf("failed to marshal tools: %w", err)
 	}
+
 	return genkit.DefinePrompt(registry, "agentThinking",
 		ai.WithSystem(systemPromptText),
 		ai.WithInputType(ThinkIn{}),
 		ai.WithOutputType(ThinkOut{}),
-		ai.WithPrompt(schema.UserThinkPromptTemplate),
+		ai.WithPrompt(fmt.Sprintf("available tools: %s", string(toolsJson))),
+		ai.WithConfig(&openai.ChatCompletionNewParams{
+			Temperature: openai.Float(0.2),
+		}),
+	), nil
+}
+
+func buildToolSelectionPrompt(registry *genkit.Genkit, toolRefs ...ai.ToolRef) (ai.Prompt, error) {
+	data, err := os.ReadFile(config.PROMPT_DIR_PATH + "/agentTool.txt")
+	if err != nil {
+		return nil, fmt.Errorf("failed to read agentTool prompt: %w", err)
+	}
+	return genkit.DefinePrompt(registry, "agentTool",
+		ai.WithSystem(string(data)),
+		ai.WithInputType(ThinkOut{}),
 		ai.WithTools(toolRefs...),
 		ai.WithReturnToolRequests(true),
-	)
+	), nil
+}
+
+func buildFeedBackPrompt(registry *genkit.Genkit) (ai.Prompt, error) {
+	data, err := os.ReadFile(config.PROMPT_DIR_PATH + "/agentFeedback.txt")
+	if err != nil {
+		return nil, fmt.Errorf("failed to read agentFeedback prompt: %w", err)
+	}
+	return genkit.DefinePrompt(registry, "agentFeedback",
+		ai.WithSystem(string(data)),
+		ai.WithInputType(ThinkIn{}),
+		ai.WithConfig(&openai.ChatCompletionNewParams{
+			Temperature: openai.Float(0.7),
+		}),
+	), nil
+}
+
+func buildObservePrompt(registry *genkit.Genkit) (ai.Prompt, error) {
+	data, err := os.ReadFile(config.PROMPT_DIR_PATH + "/agentObserve.txt")
+	if err != nil {
+		return nil, fmt.Errorf("failed to read agentObserve prompt: %w", err)
+	}
+	return genkit.DefinePrompt(registry, "observe",
+		ai.WithSystem(string(data)),
+		ai.WithOutputType(schema.Observation{}),
+		ai.WithConfig(&openai.ChatCompletionNewParams{
+			Temperature: openai.Float(0.5),
+		}),
+	), nil
 }
 
 func rawChunkHandler(cb core.StreamCallback[schema.StreamChunk]) ai.ModelStreamCallback {
@@ -107,137 +239,176 @@ func rawChunkHandler(cb core.StreamCallback[schema.StreamChunk]) ai.ModelStreamC
 	}
 }
 
-func streamThink(g *genkit.Genkit, prompt ai.Prompt) agent.StreamFlow {
-	return genkit.DefineStreamingFlow(g, agent.StreamThinkFlowName,
-		func(ctx context.Context, in schema.Schema, cb core.StreamCallback[schema.StreamChunk]) (out schema.Schema, err error) {
-			manager.GetLogger().Info("Thinking...", "input", in)
-			defer func() {
-				manager.GetLogger().Info("Think Done.", "output", out)
-			}()
-
-			history, ok := ctx.Value(memory.ChatHistoryKey).(*memory.History)
-			if !ok {
-				panic(fmt.Errorf("failed to get history from context"))
-			}
-
-			var resp *ai.ModelResponse
-			// ai.WithStreaming() receives ai.ModelStreamCallback type callback function
-			// This callback function is called when the model generates each raw streaming chunk, used for raw chunk processing
-
-			// The passed cb is user-defined callback function for handling streaming data logic, such as printing
-			if !history.IsEmpty() {
-				resp, err = prompt.Execute(ctx,
-					ai.WithInput(in),
-					ai.WithMessages(history.AllHistory()...),
-					ai.WithStreaming(rawChunkHandler(cb)),
-				)
-			} else {
-				resp, err = prompt.Execute(ctx,
-					ai.WithInput(in),
-					ai.WithStreaming(rawChunkHandler(cb)),
-				)
-			}
-			if err != nil {
-				return out, fmt.Errorf("failed to execute agentThink prompt: %w", err)
-			}
-
-			// Parse output
-			var response ThinkOut
-			err = resp.Output(&response)
-
-			if err != nil {
-				return out, fmt.Errorf("failed to parse agentThink prompt response: %w", err)
-			}
-
-			history.AddHistory(resp.History()...)
-			return response, nil
-		})
+func feedback(feedbackPrompt ai.Prompt, ctx context.Context, cb core.StreamCallback[schema.StreamChunk], messages ...*ai.Message) error {
+	_, err := feedbackPrompt.Execute(
+		ctx,
+		ai.WithMessages(messages...),
+		ai.WithStreaming(rawChunkHandler(cb)),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to execute agentFeedback prompt: %w", err)
+	}
+	return nil
 }
 
-func think(g *genkit.Genkit, prompt ai.Prompt) agent.NormalFlow {
+// ai.WithStreaming() receives ai.ModelStreamCallback type callback function
+// This callback function is called when the model generates each raw streaming chunk, used for raw chunk processing
+// The passed cb is user-defined callback function for handling streaming data logic, such as printing
+func think(
+	g *genkit.Genkit,
+	thinkPrompt ai.Prompt,
+) agent.NormalFlow {
 	return genkit.DefineFlow(g, agent.ThinkFlowName,
 		func(ctx context.Context, in schema.Schema) (out schema.Schema, err error) {
 			manager.GetLogger().Info("Thinking...", "input", in)
 			defer func() {
-				manager.GetLogger().Info("Think Done.", "output", out)
+				manager.GetLogger().Info("Think Done.", "output", out, "error", err)
 			}()
 
 			history, ok := ctx.Value(memory.ChatHistoryKey).(*memory.History)
 			if !ok {
-				panic(fmt.Errorf("failed to get history from context"))
+				return nil, fmt.Errorf("failed to get history from context")
+			}
+			sessionID, ok := ctx.Value(memory.SessionIDKey).(string)
+			if !ok || sessionID == "" {
+				return nil, fmt.Errorf("session id not found in context")
+			}
+			if history.IsEmpty(sessionID) {
+				return nil, fmt.Errorf("history is empty")
 			}
 
-			var resp *ai.ModelResponse
-			if !history.IsEmpty() {
-				resp, err = prompt.Execute(ctx,
-					ai.WithInput(in),
-					ai.WithMessages(history.AllHistory()...),
-				)
-			} else {
-				resp, err = prompt.Execute(ctx,
-					ai.WithInput(in),
-				)
-			}
-
+			// execute prompt
+			manager.GetLogger().Info("Thinking...", "input", history.WindowMemory(sessionID))
+			resp, err := thinkPrompt.Execute(ctx, ai.WithMessages(history.WindowMemory(sessionID)...))
+			manager.GetLogger().Info("Think response:", "response", resp.Text())
 			if err != nil {
-				return out, fmt.Errorf("failed to execute agentThink prompt: %w", err)
+				return nil, fmt.Errorf("failed to execute agentThink prompt: %w", err)
 			}
 
 			// Parse output
-			var response ThinkOut
-			err = resp.Output(&response)
-
+			var thinkOut ThinkOut
+			thinkOut.UsageInfo = &ai.GenerationUsage{}
+			err = resp.Output(&thinkOut)
 			if err != nil {
-				return out, fmt.Errorf("failed to parse agentThink prompt response: %w", err)
+				return nil, fmt.Errorf("failed to parse agentThink prompt response: %w", err)
 			}
 
-			history.AddHistory(resp.History()...)
-			return response, nil
+			history.AddHistory(sessionID, resp.Message)
+			schema.AccumulateUsage(thinkOut.UsageInfo, resp.Usage, in.Usage())
+
+			return thinkOut, nil
 		})
 }
 
-// act: Core logic of the executor
-func act(g *genkit.Genkit) agent.NormalFlow {
+func act(g *genkit.Genkit, mcpToolManager *tools.MCPToolManager, toolPrompt ai.Prompt) agent.NormalFlow {
 	return genkit.DefineFlow(g, agent.ActFlowName,
 		func(ctx context.Context, in schema.Schema) (out schema.Schema, err error) {
 			manager.GetLogger().Info("Acting...", "input", in)
 			defer func() {
-				manager.GetLogger().Info("Act Done.", "output", out)
+				manager.GetLogger().Info("Act Done.", "output", out, "error", err)
 			}()
 
+			// Beacause the input is in the history, so don't need to use, just check the type
 			input, ok := in.(ActIn)
 			if !ok {
 				return nil, fmt.Errorf("input is not of type ActIn, got %T", in)
 			}
+			if input.Intent == schema.GeneralInquiry || input.SuggestedTools == nil {
+				return ActOut{}, nil
+			}
 
-			var actOuts ActOut
-
-			// Execute tool calls
 			history, ok := ctx.Value(memory.ChatHistoryKey).(*memory.History)
 			if !ok {
-				panic(fmt.Errorf("failed to get history from context"))
+				return nil, fmt.Errorf("failed to get history from context")
+			}
+			sessionID, ok := ctx.Value(memory.SessionIDKey).(string)
+			if !ok || sessionID == "" {
+				return nil, fmt.Errorf("session id not found in context")
 			}
 
-			var parts []*ai.Part
-			for _, req := range input.ToolRequests {
+			// Get tool requests form LLM
+			if history.IsEmpty(sessionID) {
+				return nil, fmt.Errorf("history is empty")
+			}
+			toolReqs, err := toolPrompt.Execute(ctx,
+				ai.WithMessages(history.WindowMemory(sessionID)...),
+			)
+			if err != nil {
+				return nil, fmt.Errorf("failed to execute tool selection prompt: %w", err)
+			}
+			if len(toolReqs.ToolRequests()) == 0 {
+				return ActOut{Thought: fmt.Sprintf("have unavailable tools in %v, please check available tools list", input.SuggestedTools)}, nil
+			}
+			manager.GetLogger().Info("tool requests:", "req", toolReqs.ToolRequests())
 
-				output, err := req.Call(g, ctx)
+			// Call tool requests and collect outputs
+			var parts []*ai.Part
+			var actOuts ActOut
+			actOuts.UsageInfo = &ai.GenerationUsage{}
+			for _, req := range toolReqs.ToolRequests() {
+				output, err := tools.Call(g, mcpToolManager, req.Name, req.Input)
 				if err != nil {
-					return nil, fmt.Errorf("failed to call tool %s: %w", req.ToolName, err)
+					return nil, fmt.Errorf("failed to call tool %s: %w", req.Name, err)
 				}
 
-				parts = append(parts,
-					ai.NewToolResponsePart(&ai.ToolResponse{
-						Name:   req.ToolName,
-						Ref:    req.ToolName,
-						Output: output.Map(),
-					}))
-
+				outputJson, err := json.Marshal(output)
+				if err != nil {
+					return nil, fmt.Errorf("failed to marshal output: %w", err)
+				}
+				parts = append(parts, ai.NewJSONPart(string(outputJson)))
 				actOuts.Add(&output)
 			}
-
-			history.AddHistory(ai.NewMessage(ai.RoleTool, nil, parts...))
+			manager.GetLogger().Info("act out:", "out", actOuts)
+			// ai.RoleTool's messages will be ingored by ai.WithMessages
+			history.AddHistory(sessionID, ai.NewMessage(ai.RoleModel, nil, parts...))
+			schema.AccumulateUsage(actOuts.UsageInfo, toolReqs.Usage, in.Usage())
 
 			return actOuts, nil
+		})
+}
+
+func observe(g *genkit.Genkit, observePrompt ai.Prompt, feedbackPrompt ai.Prompt) agent.StreamFlow {
+	return genkit.DefineStreamingFlow(g, agent.ObserveFlowName,
+		func(ctx context.Context, in schema.Schema, cb core.StreamCallback[schema.StreamChunk]) (out schema.Schema, err error) {
+			manager.GetLogger().Info("Observing...", "input", in)
+			defer func() {
+				manager.GetLogger().Info("Observe Done.", "output", out, "error", err)
+			}()
+
+			history, ok := ctx.Value(memory.ChatHistoryKey).(*memory.History)
+			if !ok {
+				return nil, fmt.Errorf("failed to get history from context")
+			}
+			sessionID, ok := ctx.Value(memory.SessionIDKey).(string)
+			if !ok || sessionID == "" {
+				return nil, fmt.Errorf("session id not found in context")
+			}
+
+			if history.IsEmpty(sessionID) {
+				return nil, fmt.Errorf("history is empty")
+			}
+
+			resp, err := observePrompt.Execute(ctx,
+				ai.WithMessages(history.WindowMemory(sessionID)...),
+			)
+
+			if err != nil {
+				return nil, fmt.Errorf("failed to execute observe prompt: %w", err)
+			}
+
+			// Parse output
+			var observation schema.Observation
+			observation.UsageInfo = &ai.GenerationUsage{}
+			err = resp.Output(&observation)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse observe prompt response: %w", err)
+			}
+			manager.GetLogger().Info("Observe out:", "out", observation)
+
+			history.AddHistory(sessionID, resp.Message)
+			feedback(feedbackPrompt, ctx, cb, history.WindowMemory(sessionID)...)
+			schema.AccumulateUsage(observation.UsageInfo, resp.Usage, in.Usage())
+
+			return observation, err
 		})
 }
