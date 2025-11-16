@@ -24,9 +24,8 @@ import type {
 } from 'axios'
 import axios from 'axios'
 import NProgress from 'nprogress'
-import { useRoute, useRouter } from 'vue-router'
-import { message } from 'ant-design-vue'
 import { removeAuthState } from '@/utils/AuthUtil'
+import { useMeshStore } from '@/stores/mesh'
 
 const service: AxiosInstance = axios.create({
   //  change this to decide where to go
@@ -46,8 +45,11 @@ request.use(
       config.headers['Content-Type'] = 'application/json'
       config.data = JSON.stringify(config.data)
     }
-    console.log(config.data)
-
+    if (!config.params) {
+      config.params = {}
+    }
+    const { mesh } = useMeshStore()
+    config.params['mesh'] = mesh
     // NProgress.start()
     // console.log(config)
     return config
@@ -64,10 +66,7 @@ response.use(
   (response) => {
     NProgress.done()
     // Success case - code is 'Success'
-    if (
-      response.status === 200 &&
-      (response.data.code === 'Success')
-    ) {
+    if (response.status === 200 && response.data.code === 'Success') {
       return Promise.resolve(response.data)
     }
     // Handle 401 unauthorized
