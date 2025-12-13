@@ -175,10 +175,9 @@ func (gs *GormStore) Update(obj interface{}) error {
 	result := db.Scopes(TableScope(gs.kind.ToString())).Model(&ResourceModel{}).
 		Where("resource_key = ?", resource.ResourceKey()).
 		Updates(map[string]interface{}{
-			"name":       m.Name,
-			"mesh":       m.Mesh,
-			"data":       m.Data,
-			"updated_at": m.UpdatedAt,
+			"name": m.Name,
+			"mesh": m.Mesh,
+			"data": m.Data,
 		})
 
 	if result.Error != nil {

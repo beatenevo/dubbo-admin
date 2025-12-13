@@ -35,7 +35,7 @@ import (
 const ApplicationKind coremodel.ResourceKind = "Application"
 
 func init() {
-	coremodel.RegisterResourceSchema(ApplicationKind, NewApplicationResource)
+	coremodel.RegisterResourceSchema(ApplicationKind, NewApplicationResource, NewApplicationResourceList)
 }
 
 type ApplicationResource struct {
@@ -58,12 +58,6 @@ type ApplicationResourceStatus struct {
 	// define resource-specific status here
 }
 
-type ApplicationResourceList struct {
-	metav1.TypeMeta `json:",inline"`
-	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []ApplicationResource `json:"items"`
-}
-
 func (r *ApplicationResource) ResourceKind() coremodel.ResourceKind {
 	return ApplicationKind
 }
@@ -83,11 +77,8 @@ func (r *ApplicationResource) ResourceMeta() metav1.ObjectMeta {
 func (r *ApplicationResource) ResourceSpec() coremodel.ResourceSpec {
 	return r.Spec
 }
-func (r *ApplicationResource) DeepCopyObject() k8sruntime.Object {
-	if r == nil {
-		return nil
-	}
 
+func (r *ApplicationResource) DeepCopyObject() k8sruntime.Object {
 	out := &ApplicationResource{
 		TypeMeta: r.TypeMeta,
 		Mesh:     r.Mesh,
@@ -111,7 +102,7 @@ func (r *ApplicationResource) DeepCopyObject() k8sruntime.Object {
 func (r *ApplicationResource) String() string {
 	jsonStr, err := json.Marshal(r)
 	if err != nil {
-		logger.Errorf("failed to encode ApplicationResource: %s to json, err: %s", r.ResourceKey(), err)
+		logger.Errorf("failed to encode ApplicationResource: %s to json, err: %w", r.ResourceKey(), err)
 		return ""
 	}
 	return string(jsonStr)
@@ -128,6 +119,7 @@ func NewApplicationResourceWithAttributes(name string, mesh string) *Application
 			Labels: map[string]string{},
 		},
 		Mesh: mesh,
+		Spec: &meshproto.Application{},
 	}
 }
 
@@ -137,5 +129,60 @@ func NewApplicationResource() coremodel.Resource {
 			Kind:       string(ApplicationKind),
 			APIVersion: "v1alpha1",
 		},
+		Spec: &meshproto.Application{},
+	}
+}
+
+type ApplicationResourceList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []*ApplicationResource `json:"items"`
+}
+
+func (r *ApplicationResourceList) DeepCopyObject() k8sruntime.Object {
+	out := &ApplicationResourceList{
+		TypeMeta: r.TypeMeta,
+	}
+	r.ListMeta.DeepCopyInto(&out.ListMeta)
+
+	if len(r.Items) == 0 {
+		return out
+	}
+	out.Items = make([]*ApplicationResource, len(r.Items))
+	for i := range r.Items {
+		out.Items[i] = r.Items[i].DeepCopyObject().(*ApplicationResource)
+	}
+	return out
+}
+
+func NewApplicationResourceList() coremodel.ResourceList {
+	return &ApplicationResourceList{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       string(ApplicationKind),
+			APIVersion: "v1alpha1",
+		},
+		Items: make([]*ApplicationResource, 0),
+	}
+}
+
+func (r *ApplicationResourceList) SetItems(items []coremodel.Resource) {
+	r.Items = make([]*ApplicationResource, len(items))
+	for i := range items {
+		res, ok := items[i].(*ApplicationResource)
+		if !ok {
+			logger.Errorf("unexpected resource type, expected: %s, get %s", ApplicationKind, res.ResourceKind())
+			continue
+		}
+		r.Items[i] = res
+	}
+}
+
+func NewApplicationResourceListWithItems(items ...*ApplicationResource) *ApplicationResourceList {
+	return &ApplicationResourceList{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       string(ApplicationKind),
+			APIVersion: "v1alpha1",
+		},
+		Items: items,
 	}
 }

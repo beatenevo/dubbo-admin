@@ -15,11 +15,12 @@
  * limitations under the License.
  */
 
-package kubernetes
+package listerwatcher
 
 import (
 	"fmt"
 	"reflect"
+	"strconv"
 
 	"github.com/duke-git/lancet/v2/slice"
 	"github.com/duke-git/lancet/v2/strutil"
@@ -33,8 +34,8 @@ import (
 
 	meshproto "github.com/apache/dubbo-admin/api/mesh/v1alpha1"
 	"github.com/apache/dubbo-admin/pkg/common/bizerror"
+	"github.com/apache/dubbo-admin/pkg/common/constants"
 	enginecfg "github.com/apache/dubbo-admin/pkg/config/engine"
-	"github.com/apache/dubbo-admin/pkg/core/consts"
 	"github.com/apache/dubbo-admin/pkg/core/controller"
 	"github.com/apache/dubbo-admin/pkg/core/logger"
 	meshresource "github.com/apache/dubbo-admin/pkg/core/resource/apis/mesh/v1alpha1"
@@ -92,15 +93,16 @@ func (p *PodListerWatcher) TransformFunc() cache.TransformFunc {
 		}
 		mainContainer := p.getMainContainer(pod)
 		appName := p.getDubboAppName(pod)
+		rpcPort := p.getDubboRPCPort(pod)
 		var startTime string
 		if pod.Status.StartTime != nil {
-			startTime = pod.Status.StartTime.Format(consts.TimeFormatStr)
+			startTime = pod.Status.StartTime.Format(constants.TimeFormatStr)
 		}
-		createTime := pod.CreationTimestamp.Format(consts.TimeFormatStr)
+		createTime := pod.CreationTimestamp.Format(constants.TimeFormatStr)
 		readyTime := ""
 		slice.ForEach(pod.Status.Conditions, func(_ int, c v1.PodCondition) {
 			if c.Type == v1.PodReady && c.Status == v1.ConditionTrue {
-				readyTime = c.LastTransitionTime.Format(consts.TimeFormatStr)
+				readyTime = c.LastTransitionTime.Format(constants.TimeFormatStr)
 			}
 		})
 		phase := string(pod.Status.Phase)
@@ -117,7 +119,7 @@ func (p *PodListerWatcher) TransformFunc() cache.TransformFunc {
 			return &meshproto.Condition{
 				Type:               string(c.Type),
 				Status:             string(c.Status),
-				LastTransitionTime: c.LastTransitionTime.Format(consts.TimeFormatStr),
+				LastTransitionTime: c.LastTransitionTime.Format(constants.TimeFormatStr),
 				Reason:             c.Reason,
 				Message:            c.Message,
 			}
@@ -148,10 +150,11 @@ func (p *PodListerWatcher) TransformFunc() cache.TransformFunc {
 				})
 			}
 		}
-		res := meshresource.NewRuntimeInstanceResourceWithAttributes(pod.Name, "default")
+		res := meshresource.NewRuntimeInstanceResourceWithAttributes(pod.Name, p.getDubboMesh(pod))
 		res.Spec = &meshproto.RuntimeInstance{
 			Name:         pod.Name,
 			Ip:           pod.Status.PodIP,
+			RpcPort:      rpcPort,
 			Image:        image,
 			AppName:      appName,
 			CreateTime:   createTime,
@@ -216,6 +219,39 @@ func (p *PodListerWatcher) getDubboAppName(pod *v1.Pod) string {
 	default:
 		return ""
 	}
+}
+
+func (p *PodListerWatcher) getDubboRPCPort(pod *v1.Pod) int64 {
+	identifier := p.cfg.Properties.DubboRPCPortIdentifier
+	var rpcPort int64
+	var err error
+	switch identifier.Type {
+	case enginecfg.IdentifyByAnnotation:
+		rpcPort, err = strconv.ParseInt(pod.Annotations[identifier.AnnotationKey], 10, 64)
+	case enginecfg.IdentifyByLabel:
+		rpcPort, err = strconv.ParseInt(pod.Labels[identifier.LabelKey], 10, 64)
+	default:
+		rpcPort = 0
+	}
+	if err != nil {
+		logger.Warnf("failed to parse dubbo rpc port %s, cannot retrieve the correct dubbo rpc port",
+			pod.Annotations[identifier.AnnotationKey])
+	}
+	return rpcPort
+}
+
+func (p *PodListerWatcher) getDubboMesh(pod *v1.Pod) string {
+	identifier := p.cfg.Properties.DubboRegistryIdentifier
+	var mesh string
+	switch identifier.Type {
+	case enginecfg.IdentifyByAnnotation:
+		mesh = pod.Annotations[identifier.AnnotationKey]
+	case enginecfg.IdentifyByLabel:
+		mesh = pod.Labels[identifier.LabelKey]
+	default:
+		mesh = constants.DefaultMesh
+	}
+	return mesh
 }
 
 func (p *PodListerWatcher) getProbePort(probe *v1.Probe) int32 {

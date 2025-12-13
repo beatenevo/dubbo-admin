@@ -17,46 +17,22 @@
 
 package constants
 
-// Registry Constants
 const (
-	RegistryKey                  = "registry"
-	RegistryClusterKey           = "REGISTRY_CLUSTER"
-	RegisterModeKey              = "register-mode"
-	RegistryClusterTypeKey       = "registry-cluster-type"
-	RemoteClientNameKey          = "remote-client-name"
-	DefaultRegisterModeInterface = "interface"
-	DefaultRegisterModeInstance  = "instance"
-	DefaultRegisterModeAll       = "all"
+	TimeFormatStr = "2006-01-02 15:04:05"
 )
 
 const (
-	SerializationKey = "prefer.serialization"
+	PathSeparator      = "/"
+	DotSeparator       = "."
+	ColonSeparator     = ":"
+	CommaSeparator     = ","
+	InterrogationPoint = "?"
+	IP                 = "ip"
+	PlusSigns          = "+"
+	PunctuationPoint   = "."
+	WildcardCharacter  = "*"
 )
 
 const (
-	DubboVersionKey = "dubbo"
-	WorkLoadKey     = "workLoad"
-	ReleaseKey      = "release"
-)
-
-const (
-	ServiceInfoSide = "side"
-	ProviderSide    = "provider"
-	ConsumerSide    = "consumer"
-)
-
-const (
-	RetriesKey = "retries"
-	TimeoutKey = "timeout"
-)
-
-const (
-	Application = "application"
-	Instance    = "instance"
-	Service     = "service"
-)
-
-const (
-	Stateful  = "有状态"
-	Stateless = "无状态"
+	DefaultMesh = "default"
 )

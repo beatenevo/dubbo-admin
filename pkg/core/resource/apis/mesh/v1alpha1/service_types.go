@@ -35,7 +35,7 @@ import (
 const ServiceKind coremodel.ResourceKind = "Service"
 
 func init() {
-	coremodel.RegisterResourceSchema(ServiceKind, NewServiceResource)
+	coremodel.RegisterResourceSchema(ServiceKind, NewServiceResource, NewServiceResourceList)
 }
 
 type ServiceResource struct {
@@ -58,12 +58,6 @@ type ServiceResourceStatus struct {
 	// define resource-specific status here
 }
 
-type ServiceResourceList struct {
-	metav1.TypeMeta `json:",inline"`
-	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []ServiceResource `json:"items"`
-}
-
 func (r *ServiceResource) ResourceKind() coremodel.ResourceKind {
 	return ServiceKind
 }
@@ -83,11 +77,8 @@ func (r *ServiceResource) ResourceMeta() metav1.ObjectMeta {
 func (r *ServiceResource) ResourceSpec() coremodel.ResourceSpec {
 	return r.Spec
 }
-func (r *ServiceResource) DeepCopyObject() k8sruntime.Object {
-	if r == nil {
-		return nil
-	}
 
+func (r *ServiceResource) DeepCopyObject() k8sruntime.Object {
 	out := &ServiceResource{
 		TypeMeta: r.TypeMeta,
 		Mesh:     r.Mesh,
@@ -111,7 +102,7 @@ func (r *ServiceResource) DeepCopyObject() k8sruntime.Object {
 func (r *ServiceResource) String() string {
 	jsonStr, err := json.Marshal(r)
 	if err != nil {
-		logger.Errorf("failed to encode ServiceResource: %s to json, err: %s", r.ResourceKey(), err)
+		logger.Errorf("failed to encode ServiceResource: %s to json, err: %w", r.ResourceKey(), err)
 		return ""
 	}
 	return string(jsonStr)
@@ -128,6 +119,7 @@ func NewServiceResourceWithAttributes(name string, mesh string) *ServiceResource
 			Labels: map[string]string{},
 		},
 		Mesh: mesh,
+		Spec: &meshproto.Service{},
 	}
 }
 
@@ -137,5 +129,60 @@ func NewServiceResource() coremodel.Resource {
 			Kind:       string(ServiceKind),
 			APIVersion: "v1alpha1",
 		},
+		Spec: &meshproto.Service{},
+	}
+}
+
+type ServiceResourceList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []*ServiceResource `json:"items"`
+}
+
+func (r *ServiceResourceList) DeepCopyObject() k8sruntime.Object {
+	out := &ServiceResourceList{
+		TypeMeta: r.TypeMeta,
+	}
+	r.ListMeta.DeepCopyInto(&out.ListMeta)
+
+	if len(r.Items) == 0 {
+		return out
+	}
+	out.Items = make([]*ServiceResource, len(r.Items))
+	for i := range r.Items {
+		out.Items[i] = r.Items[i].DeepCopyObject().(*ServiceResource)
+	}
+	return out
+}
+
+func NewServiceResourceList() coremodel.ResourceList {
+	return &ServiceResourceList{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       string(ServiceKind),
+			APIVersion: "v1alpha1",
+		},
+		Items: make([]*ServiceResource, 0),
+	}
+}
+
+func (r *ServiceResourceList) SetItems(items []coremodel.Resource) {
+	r.Items = make([]*ServiceResource, len(items))
+	for i := range items {
+		res, ok := items[i].(*ServiceResource)
+		if !ok {
+			logger.Errorf("unexpected resource type, expected: %s, get %s", ServiceKind, res.ResourceKind())
+			continue
+		}
+		r.Items[i] = res
+	}
+}
+
+func NewServiceResourceListWithItems(items ...*ServiceResource) *ServiceResourceList {
+	return &ServiceResourceList{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       string(ServiceKind),
+			APIVersion: "v1alpha1",
+		},
+		Items: items,
 	}
 }

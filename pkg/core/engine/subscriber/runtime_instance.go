@@ -21,10 +21,13 @@ import (
 	"errors"
 	"reflect"
 
+	"github.com/duke-git/lancet/v2/slice"
 	"github.com/duke-git/lancet/v2/strutil"
 	"k8s.io/client-go/tools/cache"
 
 	"github.com/apache/dubbo-admin/pkg/common/bizerror"
+	"github.com/apache/dubbo-admin/pkg/common/constants"
+	enginecfg "github.com/apache/dubbo-admin/pkg/config/engine"
 	"github.com/apache/dubbo-admin/pkg/core/events"
 	"github.com/apache/dubbo-admin/pkg/core/logger"
 	meshresource "github.com/apache/dubbo-admin/pkg/core/resource/apis/mesh/v1alpha1"
@@ -34,8 +37,15 @@ import (
 )
 
 type RuntimeInstanceEventSubscriber struct {
-	instanceResourceStore store.ResourceStore
-	eventEmitter          events.Emitter
+	instanceStore store.ResourceStore
+	eventEmitter  events.Emitter
+}
+
+func NewRuntimeInstanceEventSubscriber(instanceResourceStore store.ResourceStore, emitter events.Emitter) events.Subscriber {
+	return &RuntimeInstanceEventSubscriber{
+		instanceStore: instanceResourceStore,
+		eventEmitter:  emitter,
+	}
 }
 
 func (s *RuntimeInstanceEventSubscriber) ResourceKind() coremodel.ResourceKind {
@@ -48,11 +58,11 @@ func (s *RuntimeInstanceEventSubscriber) Name() string {
 
 func (s *RuntimeInstanceEventSubscriber) ProcessEvent(event events.Event) error {
 	newObj, ok := event.NewObj().(*meshresource.RuntimeInstanceResource)
-	if !ok && newObj != nil {
+	if !ok && event.NewObj() != nil {
 		return bizerror.NewAssertionError(meshresource.RuntimeInstanceKind, reflect.TypeOf(event.NewObj()).Name())
 	}
 	oldObj, ok := event.OldObj().(*meshresource.RuntimeInstanceResource)
-	if !ok && oldObj != nil {
+	if !ok && event.OldObj() != nil {
 		return bizerror.NewAssertionError(meshresource.RuntimeInstanceKind, reflect.TypeOf(event.OldObj()).Name())
 	}
 	var processErr error
@@ -72,84 +82,42 @@ func (s *RuntimeInstanceEventSubscriber) ProcessEvent(event events.Event) error 
 		}
 		processErr = s.processDelete(oldObj)
 	}
-	eventStr := event.String()
-	if processErr == nil {
-		logger.Infof("process runtime instance event successfully, event: %s", eventStr)
-	} else {
-		logger.Errorf("process runtime instance event failed, event: %s, err: %s", eventStr, processErr.Error())
+	if processErr != nil {
+		logger.Errorf("process runtime instance event failed, cause: %s event: %s", processErr.Error(), event.String())
+		return processErr
 	}
-	return processErr
-}
-
-func (s *RuntimeInstanceEventSubscriber) getRelatedInstanceResource(
-	rtInstance *meshresource.RuntimeInstanceResource) (*meshresource.InstanceResource, error) {
-	resources, err := s.instanceResourceStore.ListByIndexes(map[string]string{
-		index.ByInstanceIpIndex: rtInstance.Spec.Ip,
-	})
-	if err != nil {
-		return nil, err
-	}
-	if len(resources) == 0 {
-		return nil, nil
-	}
-	instanceResources := make([]*meshresource.InstanceResource, len(resources))
-	for i, item := range resources {
-		if res, ok := item.(*meshresource.InstanceResource); ok {
-			instanceResources[i] = res
-		} else {
-			return nil, bizerror.NewAssertionError("InstanceResource", reflect.TypeOf(item).Name())
-		}
-	}
-	return instanceResources[0], nil
-}
-
-func (s *RuntimeInstanceEventSubscriber) mergeRuntimeInstance(
-	instanceRes *meshresource.InstanceResource,
-	rtInstanceRes *meshresource.RuntimeInstanceResource) {
-	instanceRes.Name = rtInstanceRes.Name
-	instanceRes.Spec.Name = rtInstanceRes.Spec.Name
-	instanceRes.Spec.Ip = rtInstanceRes.Spec.Ip
-	instanceRes.Labels = rtInstanceRes.Labels
-	instanceRes.Spec.Image = rtInstanceRes.Spec.Image
-	instanceRes.Spec.CreateTime = rtInstanceRes.Spec.CreateTime
-	instanceRes.Spec.StartTime = rtInstanceRes.Spec.StartTime
-	instanceRes.Spec.ReadyTime = rtInstanceRes.Spec.ReadyTime
-	instanceRes.Spec.DeployState = rtInstanceRes.Spec.Phase
-	instanceRes.Spec.WorkloadType = rtInstanceRes.Spec.WorkloadType
-	instanceRes.Spec.WorkloadName = rtInstanceRes.Spec.WorkloadName
-	instanceRes.Spec.Node = rtInstanceRes.Spec.Node
-	instanceRes.Spec.Probes = rtInstanceRes.Spec.Probes
-	instanceRes.Spec.Conditions = rtInstanceRes.Spec.Conditions
-}
-
-func (s *RuntimeInstanceEventSubscriber) fromRuntimeInstance(
-	rtInstanceRes *meshresource.RuntimeInstanceResource) *meshresource.InstanceResource {
-	instanceRes := meshresource.NewInstanceResourceWithAttributes(rtInstanceRes.Name, rtInstanceRes.Mesh)
-	s.mergeRuntimeInstance(instanceRes, rtInstanceRes)
-	return instanceRes
+	logger.Infof("process runtime instance event successfully, event: %s", event.String())
+	return nil
 }
 
 // processUpsert when runtime instance added or updated, we should add/update the corresponding instance resource
 func (s *RuntimeInstanceEventSubscriber) processUpsert(rtInstanceRes *meshresource.RuntimeInstanceResource) error {
-	instanceResource, err := s.getRelatedInstanceResource(rtInstanceRes)
+	var instanceResource *meshresource.InstanceResource
+	var err error
+	switch rtInstanceRes.Spec.SourceEngineType {
+	case string(enginecfg.Kubernetes):
+		instanceResource, err = s.getRelatedInstanceByIP(rtInstanceRes)
+	default:
+		instanceResource, err = s.getRelatedInstanceByName(rtInstanceRes)
+	}
 	if err != nil {
 		return err
 	}
-	// If instance resource exists, the rpc instance resource exists in remote registry and has been watched by discovery.
-	// So we should merge the runtime info into it
+	// if instance resource exists, that is to say the rpc instance exists in remote registry and has been watched by discovery.
+	// so we should merge the runtime info into it
 	if instanceResource != nil {
-		s.mergeRuntimeInstance(instanceResource, rtInstanceRes)
-		return s.instanceResourceStore.Update(instanceResource)
+		meshresource.MergeRuntimeInstanceIntoInstance(rtInstanceRes, instanceResource)
+		return s.instanceStore.Update(instanceResource)
 	}
-	// If instance resource does not exist, we should create a new instance resource by runtime instance
-	// If the app name is empty, we cannot identify it as a dubbo app, so we skip it
-	if strutil.IsBlank(rtInstanceRes.Spec.AppName) {
-		logger.Warnf("cannot identify runtime instance %s as a dubbo app, skipped updating instance", rtInstanceRes.Name)
+	// if instance resource does not exist, that is to say the rpc instance does not exist in remote registry.
+	// we need to check whether the runtime instance resource is enough to create a new instance resource
+	if !checkAttributesEnough(rtInstanceRes) {
+		logger.Warnf("cannot identify runtime instance %s to a dubbo instance, skipped creating new instance", rtInstanceRes.ResourceKey())
 		return nil
 	}
-	// Otherwise we can create a new instance resource by runtime instance
-	instanceRes := s.fromRuntimeInstance(rtInstanceRes)
-	if err = s.instanceResourceStore.Add(instanceRes); err != nil {
+	// if conditions met, we should create a new instance resource by runtime instance
+	instanceRes := meshresource.FromRuntimeInstance(rtInstanceRes)
+	if err = s.instanceStore.Add(instanceRes); err != nil {
 		logger.Errorf("add instance resource failed, instance: %s, err: %s", instanceRes.ResourceKey(), err.Error())
 		return err
 	}
@@ -161,14 +129,22 @@ func (s *RuntimeInstanceEventSubscriber) processUpsert(rtInstanceRes *meshresour
 
 // processDelete when runtime instance deleted, we should delete the corresponding instance resource
 func (s *RuntimeInstanceEventSubscriber) processDelete(rtInstanceRes *meshresource.RuntimeInstanceResource) error {
-	instanceResource, err := s.getRelatedInstanceResource(rtInstanceRes)
+	var instanceResource *meshresource.InstanceResource
+	var err error
+	switch rtInstanceRes.Spec.SourceEngineType {
+	case string(enginecfg.Kubernetes):
+		instanceResource, err = s.getRelatedInstanceByIP(rtInstanceRes)
+	default:
+		instanceResource, err = s.getRelatedInstanceByName(rtInstanceRes)
+	}
 	if err != nil {
 		return err
 	}
 	if instanceResource == nil {
+		logger.Warnf("cannot find instance resource by runtime instance %s, skipped deleting instance", rtInstanceRes.ResourceKey())
 		return nil
 	}
-	if err = s.instanceResourceStore.Delete(instanceResource.ResourceKey()); err != nil {
+	if err = s.instanceStore.Delete(instanceResource.ResourceKey()); err != nil {
 		logger.Errorf("delete instance resource failed, instance: %s, err: %s", instanceResource.ResourceKey(), err.Error())
 		return err
 	}
@@ -178,9 +154,74 @@ func (s *RuntimeInstanceEventSubscriber) processDelete(rtInstanceRes *meshresour
 	return nil
 }
 
-func NewRuntimeInstanceEventSubscriber(instanceResourceStore store.ResourceStore, emitter events.Emitter) events.Subscriber {
-	return &RuntimeInstanceEventSubscriber{
-		instanceResourceStore: instanceResourceStore,
-		eventEmitter:          emitter,
+func (s *RuntimeInstanceEventSubscriber) getRelatedInstanceByName(
+	rtInstanceRes *meshresource.RuntimeInstanceResource) (*meshresource.InstanceResource, error) {
+	if rtInstanceRes.Spec == nil || strutil.IsBlank(rtInstanceRes.Spec.AppName) ||
+		strutil.IsBlank(rtInstanceRes.Spec.Ip) || rtInstanceRes.Spec.RpcPort <= 0 {
+		return nil, nil
 	}
+	instanceResName := meshresource.BuildInstanceResName(rtInstanceRes.Spec.AppName, rtInstanceRes.Spec.Ip, rtInstanceRes.Spec.RpcPort)
+	resources, err := s.instanceStore.ListByIndexes(map[string]string{
+		index.ByInstanceNameIndex: instanceResName,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(resources) == 0 {
+		return nil, nil
+	}
+	instanceResList := make([]*meshresource.InstanceResource, len(resources))
+	for i, item := range resources {
+		res, ok := item.(*meshresource.InstanceResource)
+		if !ok {
+			return nil, bizerror.NewAssertionError("InstanceResource", reflect.TypeOf(item).Name())
+		}
+		instanceResList[i] = res
+	}
+	if len(instanceResList) > 1 {
+		resKeys := slice.Map(instanceResList, func(index int, item *meshresource.InstanceResource) string {
+			return item.ResourceKey()
+		})
+		logger.Warnf("there are more than two instances which have the same name, instance keys: %s, name: %s", resKeys, instanceResName)
+		return nil, nil
+	}
+	return instanceResList[0], nil
+}
+
+func (s *RuntimeInstanceEventSubscriber) getRelatedInstanceByIP(
+	rtInstanceRes *meshresource.RuntimeInstanceResource) (*meshresource.InstanceResource, error) {
+	resources, err := s.instanceStore.ListByIndexes(map[string]string{
+		index.ByInstanceIpIndex: rtInstanceRes.Spec.Ip,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(resources) == 0 {
+		return nil, nil
+	}
+	instanceResList := make([]*meshresource.InstanceResource, len(resources))
+	for i, item := range resources {
+		res, ok := item.(*meshresource.InstanceResource)
+		if !ok {
+			return nil, bizerror.NewAssertionError("InstanceResource", reflect.TypeOf(item).Name())
+		}
+		instanceResList[i] = res
+	}
+	if len(instanceResList) > 1 {
+		resKeys := slice.Map(instanceResList, func(index int, item *meshresource.InstanceResource) string {
+			return item.ResourceKey()
+		})
+		logger.Warnf("there are instances which have same ip, instance keys: %s, ip: %s", resKeys, rtInstanceRes.Spec.Ip)
+		return nil, nil
+	}
+	return instanceResList[0], nil
+}
+
+func checkAttributesEnough(rtInstanceRes *meshresource.RuntimeInstanceResource) bool {
+	if rtInstanceRes.Spec == nil || strutil.IsBlank(rtInstanceRes.Spec.AppName) ||
+		strutil.IsBlank(rtInstanceRes.Spec.Ip) || rtInstanceRes.Spec.RpcPort <= 0 ||
+		strutil.IsBlank(rtInstanceRes.Mesh) || constants.DefaultMesh == rtInstanceRes.Mesh {
+		return false
+	}
+	return true
 }

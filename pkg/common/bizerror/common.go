@@ -22,11 +22,11 @@ import (
 )
 
 func NewAssertionError(expected, actual interface{}) Error {
-	return NewBizError(UnknownError, fmt.Sprintf("type assertion error, expected:%v, actual:%v", expected, actual))
+	return New(UnknownError, fmt.Sprintf("type assertion error, expected:%v, actual:%v", expected, actual))
 }
 func NewUnauthorizedError() Error {
-	return NewBizError(Unauthorized, "no access, please login")
+	return New(Unauthorized, "no access, please login")
 }
 func MeshNotFoundError(mesh string) Error {
-	return NewBizError(UnknownError, fmt.Sprintf("mesh of name %s is not found", mesh))
+	return New(UnknownError, fmt.Sprintf("mesh of name %s is not found", mesh))
 }

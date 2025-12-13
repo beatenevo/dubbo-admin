@@ -35,7 +35,7 @@ import (
 const AffinityRouteKind coremodel.ResourceKind = "AffinityRoute"
 
 func init() {
-	coremodel.RegisterResourceSchema(AffinityRouteKind, NewAffinityRouteResource)
+	coremodel.RegisterResourceSchema(AffinityRouteKind, NewAffinityRouteResource, NewAffinityRouteResourceList)
 }
 
 type AffinityRouteResource struct {
@@ -58,12 +58,6 @@ type AffinityRouteResourceStatus struct {
 	// define resource-specific status here
 }
 
-type AffinityRouteResourceList struct {
-	metav1.TypeMeta `json:",inline"`
-	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []AffinityRouteResource `json:"items"`
-}
-
 func (r *AffinityRouteResource) ResourceKind() coremodel.ResourceKind {
 	return AffinityRouteKind
 }
@@ -83,11 +77,8 @@ func (r *AffinityRouteResource) ResourceMeta() metav1.ObjectMeta {
 func (r *AffinityRouteResource) ResourceSpec() coremodel.ResourceSpec {
 	return r.Spec
 }
-func (r *AffinityRouteResource) DeepCopyObject() k8sruntime.Object {
-	if r == nil {
-		return nil
-	}
 
+func (r *AffinityRouteResource) DeepCopyObject() k8sruntime.Object {
 	out := &AffinityRouteResource{
 		TypeMeta: r.TypeMeta,
 		Mesh:     r.Mesh,
@@ -111,7 +102,7 @@ func (r *AffinityRouteResource) DeepCopyObject() k8sruntime.Object {
 func (r *AffinityRouteResource) String() string {
 	jsonStr, err := json.Marshal(r)
 	if err != nil {
-		logger.Errorf("failed to encode AffinityRouteResource: %s to json, err: %s", r.ResourceKey(), err)
+		logger.Errorf("failed to encode AffinityRouteResource: %s to json, err: %w", r.ResourceKey(), err)
 		return ""
 	}
 	return string(jsonStr)
@@ -128,6 +119,7 @@ func NewAffinityRouteResourceWithAttributes(name string, mesh string) *AffinityR
 			Labels: map[string]string{},
 		},
 		Mesh: mesh,
+		Spec: &meshproto.AffinityRoute{},
 	}
 }
 
@@ -137,5 +129,60 @@ func NewAffinityRouteResource() coremodel.Resource {
 			Kind:       string(AffinityRouteKind),
 			APIVersion: "v1alpha1",
 		},
+		Spec: &meshproto.AffinityRoute{},
+	}
+}
+
+type AffinityRouteResourceList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []*AffinityRouteResource `json:"items"`
+}
+
+func (r *AffinityRouteResourceList) DeepCopyObject() k8sruntime.Object {
+	out := &AffinityRouteResourceList{
+		TypeMeta: r.TypeMeta,
+	}
+	r.ListMeta.DeepCopyInto(&out.ListMeta)
+
+	if len(r.Items) == 0 {
+		return out
+	}
+	out.Items = make([]*AffinityRouteResource, len(r.Items))
+	for i := range r.Items {
+		out.Items[i] = r.Items[i].DeepCopyObject().(*AffinityRouteResource)
+	}
+	return out
+}
+
+func NewAffinityRouteResourceList() coremodel.ResourceList {
+	return &AffinityRouteResourceList{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       string(AffinityRouteKind),
+			APIVersion: "v1alpha1",
+		},
+		Items: make([]*AffinityRouteResource, 0),
+	}
+}
+
+func (r *AffinityRouteResourceList) SetItems(items []coremodel.Resource) {
+	r.Items = make([]*AffinityRouteResource, len(items))
+	for i := range items {
+		res, ok := items[i].(*AffinityRouteResource)
+		if !ok {
+			logger.Errorf("unexpected resource type, expected: %s, get %s", AffinityRouteKind, res.ResourceKind())
+			continue
+		}
+		r.Items[i] = res
+	}
+}
+
+func NewAffinityRouteResourceListWithItems(items ...*AffinityRouteResource) *AffinityRouteResourceList {
+	return &AffinityRouteResourceList{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       string(AffinityRouteKind),
+			APIVersion: "v1alpha1",
+		},
+		Items: items,
 	}
 }

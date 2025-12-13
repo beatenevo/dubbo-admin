@@ -107,13 +107,13 @@ func (b *eventBus) Send(event Event) {
 	}
 	subs, exists := b.subscriberDir[rk]
 	if !exists {
-		logger.Warnf("no subscriber for resource %s, skipped sending event%v", rk, event)
+		logger.Infof("no subscriber for resource %s, skipped sending event%v", rk, event)
 		return
 	}
 	for _, sub := range subs {
 		// TODO Do we need to support reprocess
 		if err := sub.ProcessEvent(event); err != nil {
-			logger.Errorf("failed to process event in %s , skipped, event: %v", sub.Name(), event)
+			logger.Errorf("failed to process event in %s, cause: %s, event: %v", sub.Name(), err.Error(), event)
 		}
 	}
 }

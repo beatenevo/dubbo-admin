@@ -20,6 +20,7 @@ package index
 import (
 	"reflect"
 
+	"github.com/duke-git/lancet/v2/strutil"
 	"k8s.io/client-go/tools/cache"
 
 	"github.com/apache/dubbo-admin/pkg/common/bizerror"
@@ -29,12 +30,14 @@ import (
 const (
 	ByInstanceAppNameIndex = "idx_instance_app_name"
 	ByInstanceIpIndex      = "idx_instance_ip"
+	ByInstanceNameIndex    = "idx_instance_name"
 )
 
 func init() {
 	RegisterIndexers(meshresource.InstanceKind, map[string]cache.IndexFunc{
 		ByInstanceAppNameIndex: byInstanceAppName,
-		ByInstanceIpIndex:      byIp,
+		ByInstanceIpIndex:      byInstanceIp,
+		ByInstanceNameIndex:    byInstanceName,
 	})
 }
 
@@ -43,19 +46,30 @@ func byInstanceAppName(obj interface{}) ([]string, error) {
 	if !ok {
 		return nil, bizerror.NewAssertionError(meshresource.InstanceKind, reflect.TypeOf(obj).Name())
 	}
-	if instance.Spec == nil {
+	if instance.Spec == nil || strutil.IsBlank(instance.Spec.AppName) {
 		return []string{}, nil
 	}
 	return []string{instance.Spec.AppName}, nil
 }
 
-func byIp(obj interface{}) ([]string, error) {
+func byInstanceIp(obj interface{}) ([]string, error) {
 	instance, ok := obj.(*meshresource.InstanceResource)
 	if !ok {
 		return nil, bizerror.NewAssertionError(meshresource.InstanceKind, reflect.TypeOf(obj).Name())
 	}
-	if instance.Spec == nil {
+	if instance.Spec == nil || strutil.IsBlank(instance.Spec.Ip) {
 		return []string{}, nil
 	}
 	return []string{instance.Spec.Ip}, nil
+}
+
+func byInstanceName(obj interface{}) ([]string, error) {
+	instance, ok := obj.(*meshresource.InstanceResource)
+	if !ok {
+		return nil, bizerror.NewAssertionError(meshresource.InstanceKind, reflect.TypeOf(obj).Name())
+	}
+	if instance.Spec == nil || strutil.IsBlank(instance.Spec.Name) {
+		return []string{}, nil
+	}
+	return []string{instance.Spec.Name}, nil
 }
