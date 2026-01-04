@@ -19,8 +19,10 @@
     <search-table :search-domain="searchDomain">
       <template #bodyCell="{ text, record, index, column }">
         <template v-if="column.dataIndex === 'ip'">
-          <span class="app-link"
-            @click="router.push(`/resources/instances/detail/${record.name}/${record[column.key]}`)">
+          <span
+            class="app-link"
+            @click="router.push(`/resources/instances/detail/${record.name}/${record[column.key]}`)"
+          >
             <b>
               <Icon style="margin-bottom: -2px" icon="material-symbols:attach-file-rounded"></Icon>
               {{ text }}
@@ -66,12 +68,11 @@
 import { onMounted, provide, reactive, watch } from 'vue'
 import { searchInstances } from '@/api/service/instance'
 import SearchTable from '@/components/SearchTable.vue'
-import { SearchDomain, sortString } from '@/utils/SearchUtil'
+import { SearchDomain } from '@/utils/SearchUtil'
 import { PROVIDE_INJECT_KEY } from '@/base/enums/ProvideInject'
 import { INSTANCE_DEPLOY_COLOR, INSTANCE_REGISTER_COLOR, PRIMARY_COLOR } from '@/base/constants'
 import router from '@/router'
 import { Icon } from '@iconify/vue'
-import { formattedDate } from '../../../utils/DateUtil'
 import { queryMetrics } from '@/base/http/promQuery'
 import { isNumber } from 'lodash'
 import { bytesToHuman } from '@/utils/ByteUtil'
@@ -99,7 +100,7 @@ let columns = [
     title: 'instanceDomain.deployState',
     key: 'deployState',
     dataIndex: 'deployState',
-    width: 120,
+    width: 120
     // sorter: (a: any, b: any) => sortString(a.deployState, b.deployState)
   },
 
@@ -181,10 +182,10 @@ const searchDomain = reactive(
   new SearchDomain(
     [
       {
-        label: 'appName',
+        label: 'instanceDomain.instanceIP',
         param: 'keywords',
         defaultValue: query,
-        placeholder: 'typeAppName',
+        placeholder: 'typeInstanceIP',
         style: {
           width: '200px'
         }

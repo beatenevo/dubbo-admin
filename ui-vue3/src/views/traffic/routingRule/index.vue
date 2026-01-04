@@ -18,7 +18,8 @@
   <div class="routing-rule-container">
     <search-table :search-domain="searchDomain">
       <template #customOperation>
-        <a-button type="primary" @click="router.push(`/traffic/addRoutingRule/addByFormView`)">新增条件路由规则
+        <a-button type="primary" @click="router.push(`/traffic/addRoutingRule/addByFormView`)"
+          >新增条件路由规则
         </a-button>
       </template>
       <template #bodyCell="{ text, column, record }">
@@ -44,10 +45,18 @@
           <a-button type="link" @click="router.push(`formview/${record.ruleName}`)">
             查看
           </a-button>
-          <a-button type="link" @click="router.push(`/traffic/updateRoutingRule/updateByFormView/${record.ruleName}`)">
+          <a-button
+            type="link"
+            @click="router.push(`/traffic/updateRoutingRule/updateByFormView/${record.ruleName}`)"
+          >
             修改
           </a-button>
-          <a-popconfirm title="确认删除该条件路由规则？" ok-text="Yes" cancel-text="No" @confirm="confirm(record.ruleName)">
+          <a-popconfirm
+            title="确认删除该条件路由规则？"
+            ok-text="Yes"
+            cancel-text="No"
+            @confirm="confirm(record.ruleName)"
+          >
             <a-button type="link"> 删除</a-button>
           </a-popconfirm>
         </template>
@@ -66,6 +75,7 @@ import router from '@/router'
 import { Icon } from '@iconify/vue'
 import { PRIMARY_COLOR } from '@/base/constants'
 import { formattedDate } from '@/utils/DateUtil'
+import { HTTP_STATUS } from '@/base/http/constants'
 const TAB_STATE = inject(PROVIDE_INJECT_KEY.PROVIDE_INJECT_KEY)
 let columns = [
   {
@@ -80,21 +90,21 @@ let columns = [
     key: 'ruleGranularity',
     dataIndex: 'ruleGranularity',
     render: (text, record) => (record.isService ? '服务' : '应用'),
-    width: 100,
+    width: 100
     // sorter: (a: any, b: any) => sortString(a.instanceNum, b.instanceNum)
   },
   {
     title: 'createTime',
     key: 'createTime',
     dataIndex: 'createTime',
-    width: 120,
+    width: 120
     // sorter: (a: any, b: any) => sortString(a.instanceNum, b.instanceNum)
   },
   {
     title: 'enabled',
     key: 'enabled',
     dataIndex: 'enabled',
-    width: 120,
+    width: 120
     // sorter: (a: any, b: any) => sortString(a.instanceNum, b.instanceNum)
   },
   {
@@ -109,7 +119,7 @@ const searchDomain = reactive(
     [
       {
         label: 'serviceGovernance',
-        param: 'serviceGovernance',
+        param: 'keywords',
         placeholder: 'typeRoutingRules',
         style: {
           width: '200px'
@@ -124,7 +134,7 @@ const searchDomain = reactive(
 //Delete conditional routing
 const deleteRule = async (ruleName: string) => {
   const res = await deleteConditionRuleAPI(ruleName)
-  if (res.code === 200) {
+  if (res.code === HTTP_STATUS.SUCCESS) {
     await searchDomain.onSearch()
   }
 }
