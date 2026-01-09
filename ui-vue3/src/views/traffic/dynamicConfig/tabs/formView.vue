@@ -139,7 +139,7 @@
                         :options="Object.keys(config.matchesValue).map((item) => ({ value: item }))"
                       />
                       <a-button
-                        v-if="!isEdit"
+                        v-if="isEdit"
                         @click="config.hasMatch = false"
                         style="margin-left: 10px; padding: 5px"
                         danger
@@ -220,7 +220,7 @@
                           style="width: 15vw"
                         />
                         <a-button
-                          v-if="!isEdit"
+                          v-if="isEdit"
                           :disabled="config.matchesValue[key].arr.length === 1"
                           @click="config.delArrConfig(config.matchesValue, key, idx)"
                           style="margin-left: 10px; padding: 5px"
@@ -232,7 +232,7 @@
                           ></Icon>
                         </a-button>
                         <a-button
-                          v-if="!isEdit"
+                          v-if="isEdit"
                           @click="config.addArrConfig(config.matchesValue, key, idx)"
                           style="margin-left: 10px; padding: 5px"
                           type="primary"
@@ -329,7 +329,7 @@
                           style="width: 15vw"
                         />
                         <a-button
-                          v-if="!isEdit"
+                          v-if="isEdit"
                           :disabled="config.parametersValue[key].arr.length === 1"
                           @click="config.delArrConfig(config.parametersValue, key, idx)"
                           style="margin-left: 10px; padding: 5px"
@@ -341,7 +341,7 @@
                           ></Icon>
                         </a-button>
                         <a-button
-                          v-if="!isEdit"
+                          v-if="isEdit"
                           @click="
                             config.addArrConfig(config.parametersValue, key, idx, { relation: '=' })
                           "
