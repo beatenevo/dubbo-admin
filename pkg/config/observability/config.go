@@ -15,46 +15,49 @@
  * limitations under the License.
  */
 
-package store
+package observability
 
 import (
 	"fmt"
+	"net/url"
 
-	set "github.com/duke-git/lancet/v2/datastructure/set"
+	"github.com/duke-git/lancet/v2/strutil"
 
 	"github.com/apache/dubbo-admin/pkg/common/bizerror"
 	"github.com/apache/dubbo-admin/pkg/config"
 )
 
-var _ config.Config = &Config{}
-
-type Type = string
-
-const (
-	Memory   Type = "memory"
-	MySQL    Type = "mysql"
-	Postgres Type = "postgres"
-)
-
-var supportTypes = set.New(Memory, MySQL, Postgres)
-
-// Config defines the ResourceStore configuration
 type Config struct {
 	config.BaseConfig
-	// Type of Store used in Admin
-	Type    Type   `json:"type" yaml:"type"`
-	Address string `json:"address" yaml:"address"`
+	// Grafana is the url of grafana
+	Grafana string `json:"grafana" yaml:"grafana"`
+	// Prometheus is the url of prometheus
+	Prometheus string `json:"prometheus" yaml:"prometheus"`
+
+	GrafanaBaseURL    *url.URL `json:"-" yaml:"-"`
+	PrometheusBaseURL *url.URL `json:"-" yaml:"-"`
 }
 
 func (c *Config) Validate() error {
-	if !supportTypes.Contain(c.Type) {
-		return bizerror.New(bizerror.ConfigError, fmt.Sprintf("unsupported store type: %s", c.Type))
+	if strutil.IsNotBlank(c.Prometheus) {
+		prometheusBaseURL, err := url.Parse(c.Prometheus)
+		if err != nil {
+			return bizerror.Wrap(err, bizerror.ConfigError,
+				fmt.Sprintf("invalid prometheus url: %s", c.Prometheus))
+		}
+		c.PrometheusBaseURL = prometheusBaseURL
+	}
+	if strutil.IsNotBlank(c.Grafana) {
+		grafanaBaseURL, err := url.Parse(c.Grafana)
+		if err != nil {
+			return bizerror.Wrap(err, bizerror.ConfigError,
+				fmt.Sprintf("invalid grafana url: %s", c.Grafana))
+		}
+		c.GrafanaBaseURL = grafanaBaseURL
 	}
 	return nil
 }
 
-func DefaultStoreConfig() *Config {
-	return &Config{
-		Type: Memory,
-	}
+func DefaultObservabilityConfig() *Config {
+	return &Config{}
 }

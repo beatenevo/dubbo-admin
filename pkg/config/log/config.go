@@ -15,46 +15,58 @@
  * limitations under the License.
  */
 
-package store
+package log
 
 import (
 	"fmt"
 
-	set "github.com/duke-git/lancet/v2/datastructure/set"
+	"github.com/duke-git/lancet/v2/slice"
 
 	"github.com/apache/dubbo-admin/pkg/common/bizerror"
 	"github.com/apache/dubbo-admin/pkg/config"
 )
 
-var _ config.Config = &Config{}
+type Level string
 
-type Type = string
+var supportLevels = []Level{LevelDebug, LevelInfo, LevelWarn, LevelError}
 
 const (
-	Memory   Type = "memory"
-	MySQL    Type = "mysql"
-	Postgres Type = "postgres"
+	LevelDebug Level = "debug"
+	LevelInfo  Level = "info"
+	LevelWarn  Level = "warn"
+	LevelError Level = "error"
 )
 
-var supportTypes = set.New(Memory, MySQL, Postgres)
+const (
+	defaultLogLevel   = LevelDebug
+	defaultOutputPath = "logs/dubbo-admin.log"
+	defaultMaxSize    = 100
+	defaultMaxBackups = 5
+	defaultMaxAge     = 3
+)
 
-// Config defines the ResourceStore configuration
 type Config struct {
 	config.BaseConfig
-	// Type of Store used in Admin
-	Type    Type   `json:"type" yaml:"type"`
-	Address string `json:"address" yaml:"address"`
+	Level      Level  `json:"level" yaml:"level"`
+	OutputPath string `json:"outputPath" yaml:"outputPath"`
+	MaxSize    int    `json:"maxSize" yaml:"maxSize"`
+	MaxBackups int    `json:"maxBackups" yaml:"maxBackups"`
+	MaxAge     int    `json:"maxAge" yaml:"maxAge"`
 }
 
 func (c *Config) Validate() error {
-	if !supportTypes.Contain(c.Type) {
-		return bizerror.New(bizerror.ConfigError, fmt.Sprintf("unsupported store type: %s", c.Type))
+	if !slice.Contain(supportLevels, c.Level) {
+		return bizerror.New(bizerror.ConfigError, fmt.Sprintf("unsupported log level: %s", c.Level))
 	}
 	return nil
 }
 
-func DefaultStoreConfig() *Config {
+func DefaultLogConfig() *Config {
 	return &Config{
-		Type: Memory,
+		Level:      defaultLogLevel,
+		OutputPath: defaultOutputPath,
+		MaxSize:    defaultMaxSize,
+		MaxBackups: defaultMaxBackups,
+		MaxAge:     defaultMaxAge,
 	}
 }
