@@ -4,6 +4,7 @@ import (
 	"context"
 	compRag "dubbo-admin-ai/component/rag"
 	appconfig "dubbo-admin-ai/config"
+	"dubbo-admin-ai/runtime"
 	"flag"
 	"fmt"
 	"log"
@@ -17,6 +18,7 @@ import (
 	"github.com/firebase/genkit/go/plugins/googlegenai"
 	"github.com/firebase/genkit/go/plugins/pinecone"
 	"github.com/openai/openai-go/option"
+	"gopkg.in/yaml.v3"
 )
 
 type IndexCommand struct {
@@ -116,7 +118,7 @@ func executeIndexing(cmd *IndexCommand) error {
 	// Build-time target index selection: default to directory name for this CLI
 	targetIndex := getNamespace("", cmd.Directory)
 
-	sys, err := compRag.BuildRAGFromSpec(ctx, g, cfg)
+	sys, err := buildRAGSystem(g, cfg)
 	if err != nil {
 		return fmt.Errorf("failed to build RAG system: %w", err)
 	}
@@ -174,4 +176,42 @@ func loadRAGConfig(configPath string) (*compRag.RAGSpec, error) {
 	}
 
 	return &cfg, nil
+}
+
+func buildRAGSystem(g *genkit.Genkit, cfg *compRag.RAGSpec) (*compRag.RAG, error) {
+	if g == nil {
+		return nil, fmt.Errorf("genkit registry is nil")
+	}
+	if cfg == nil {
+		return nil, fmt.Errorf("rag config is nil")
+	}
+
+	var specNode yaml.Node
+	if err := specNode.Encode(cfg); err != nil {
+		return nil, fmt.Errorf("failed to encode rag config: %w", err)
+	}
+
+	compRaw, err := compRag.RAGFactory(&specNode)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create rag component: %w", err)
+	}
+
+	ragComp, ok := compRaw.(*compRag.RAGComponent)
+	if !ok {
+		return nil, fmt.Errorf("invalid rag component type: %T", compRaw)
+	}
+
+	rt := runtime.NewRuntime()
+	rt.SetGenkitRegistry(g)
+	if err := ragComp.Validate(); err != nil {
+		return nil, fmt.Errorf("failed to validate rag component: %w", err)
+	}
+	if err := ragComp.Init(rt); err != nil {
+		return nil, fmt.Errorf("failed to init rag component: %w", err)
+	}
+	if ragComp.Rag == nil {
+		return nil, fmt.Errorf("rag system is not initialized")
+	}
+
+	return ragComp.Rag, nil
 }

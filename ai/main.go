@@ -30,11 +30,11 @@ func registerFactorys(rt *runtime.Runtime) {
 	// Model components (depend on logger)
 	rt.RegisterFactory("models", models.ModelsFactory)
 
-	// Tools components (depend on models, memory)
-	rt.RegisterFactory("tools", tools.ToolsFactory)
-
 	// RAG components (depend on models)
 	rt.RegisterFactory("rag", compRag.RAGFactory)
+
+	// Tools components (depend on models, memory, rag)
+	rt.RegisterFactory("tools", tools.ToolsFactory)
 
 	// Server components (depend on all other components)
 	rt.RegisterFactory("server", server.ServerFactory)
@@ -75,18 +75,7 @@ func stopComponents(rt *runtime.Runtime) error {
 	done := make(chan error)
 
 	go func() {
-		rt.Components.Range(func(key, value interface{}) bool {
-			comp := value.(runtime.Component)
-
-			if err := comp.Stop(); err != nil {
-				rt.GetLogger().Error("Failed to stop component",
-					"name", comp.Name(),
-					"error", err)
-			}
-
-			return true
-		})
-		done <- nil
+		done <- rt.StopAll()
 	}()
 
 	select {

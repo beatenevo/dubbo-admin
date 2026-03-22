@@ -18,7 +18,6 @@
 package tools
 
 import (
-	"dubbo-admin-ai/component/memory"
 	"dubbo-admin-ai/component/tools/engine"
 	"dubbo-admin-ai/runtime"
 	"fmt"
@@ -28,8 +27,8 @@ import (
 )
 
 type ToolsComponent struct {
+	instanceName string
 	registry     *genkit.Genkit
-	history      *memory.HistoryMemory
 	toolManagers []engine.ToolManager
 	toolRefs     []ai.ToolRef
 	config       ToolConfig
@@ -42,7 +41,14 @@ func NewToolsComponent(config ToolConfig) (runtime.Component, error) {
 }
 
 func (t *ToolsComponent) Name() string {
+	if t.instanceName != "" {
+		return t.instanceName
+	}
 	return "tools"
+}
+
+func (t *ToolsComponent) SetName(name string) {
+	t.instanceName = name
 }
 
 func (t *ToolsComponent) Validate() error {
@@ -61,34 +67,22 @@ func (t *ToolsComponent) Validate() error {
 func (t *ToolsComponent) Init(rt *runtime.Runtime) error {
 	t.registry = rt.GetGenkitRegistry()
 
-	memoryComp, err := rt.GetComponent("memory")
-	if err != nil {
-		return fmt.Errorf("memory component not found: %w", err)
-	}
-
-	memComp, ok := memoryComp.(*memory.MemoryComponent)
-	if !ok {
-		return fmt.Errorf("invalid memory component type")
-	}
-
-	t.history, err = memComp.GetMemory()
-	if err != nil {
-		return fmt.Errorf("failed to get history from memory component: %w", err)
-	}
-
 	// Initialize Tool Managers
 	if t.config.EnableMockTools {
 		t.toolManagers = append(t.toolManagers,
-			engine.NewMockToolManager(t.registry))
+			engine.NewMockToolManager(rt))
 	}
 
 	if t.config.EnableInternalTools {
-		t.toolManagers = append(t.toolManagers,
-			engine.NewInternalToolManager(t.registry, t.history))
+		internalMgr, err := engine.NewInternalToolManager(rt)
+		if err != nil {
+			return fmt.Errorf("failed to create internal tool manager: %w", err)
+		}
+		t.toolManagers = append(t.toolManagers, internalMgr)
 	}
 
 	if t.config.EnableMCPTools {
-		mcpToolManager, err := engine.NewMCPToolManager(t.registry, t.config.MCPHostName)
+		mcpToolManager, err := engine.NewMCPToolManager(rt, t.config.MCPHostName)
 		if err != nil {
 			return fmt.Errorf("failed to create MCP tool manager: %w", err)
 		}
