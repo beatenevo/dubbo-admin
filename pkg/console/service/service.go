@@ -41,17 +41,21 @@ import (
 
 // GetServiceTabDistribution get service distribution
 func GetServiceTabDistribution(ctx consolectx.Context, req *model.ServiceTabDistributionReq) (*model.SearchPaginationResult, error) {
-	indexes := map[string]string{
-		index.ByServiceConsumerServiceName: req.ServiceName,
+	conditions := []index.IndexCondition{
+		{IndexName: index.ByServiceConsumerServiceName, Value: req.ServiceName, Operator: index.Equals},
 	}
 	// for now, only support accurate name match
 	if strutil.IsNotBlank(req.Keywords) {
-		indexes[index.ByServiceConsumerAppName] = req.Keywords
+		conditions = append(conditions, index.IndexCondition{
+			IndexName: index.ByServiceConsumerAppName,
+			Value:     req.Keywords,
+			Operator:  index.Equals,
+		})
 	}
 	pageData, err := manager.PageListByIndexes[*meshresource.ServiceConsumerMetadataResource](
 		ctx.ResourceManager(),
 		meshresource.ServiceConsumerMetadataKind,
-		indexes,
+		conditions,
 		req.PageReq)
 	if err != nil {
 		logger.Errorf("get service consumer %s failed, cause: %v", req.ServiceName, err)
@@ -98,8 +102,8 @@ func SearchServices(ctx consolectx.Context, req *model.ServiceSearchReq) (*model
 	pageData, err := manager.PageListByIndexes[*meshresource.ServiceProviderMetadataResource](
 		ctx.ResourceManager(),
 		meshresource.ServiceProviderMetadataKind,
-		map[string]string{
-			index.ByMeshIndex: req.Mesh,
+		[]index.IndexCondition{
+			{IndexName: index.ByMeshIndex, Value: req.Mesh, Operator: index.Equals},
 		},
 		req.PageReq,
 	)
@@ -120,14 +124,14 @@ func SearchServices(ctx consolectx.Context, req *model.ServiceSearchReq) (*model
 	}, nil
 }
 
-// SearchServicesByKeywords search services by keywords, for now only support accurate search
+// SearchServicesByKeywords search services by keywords with prefix matching
 func SearchServicesByKeywords(ctx consolectx.Context, req *model.ServiceSearchReq) (*model.SearchPaginationResult, error) {
 	pageData, err := manager.PageListByIndexes[*meshresource.ServiceProviderMetadataResource](
 		ctx.ResourceManager(),
 		meshresource.ServiceProviderMetadataKind,
-		map[string]string{
-			index.ByMeshIndex:                  req.Mesh,
-			index.ByServiceProviderServiceName: req.Keywords,
+		[]index.IndexCondition{
+			{IndexName: index.ByMeshIndex, Value: req.Mesh, Operator: index.Equals},
+			{IndexName: index.ByServiceProviderServiceName, Value: req.Keywords, Operator: index.HasPrefix},
 		},
 		req.PageReq,
 	)
@@ -190,10 +194,10 @@ func GetServiceMethodDetail(ctx consolectx.Context, req model.ServiceMethodDetai
 }
 
 // providerIndexes defines the canonical indexes for provider metadata
-func providerIndexes(req model.BaseServiceReq) map[string]string {
-	return map[string]string{
-		index.ByMeshIndex:                 req.Mesh,
-		index.ByServiceProviderServiceKey: req.ServiceKey(),
+func providerIndexes(req model.BaseServiceReq) []index.IndexCondition {
+	return []index.IndexCondition{
+		{IndexName: index.ByMeshIndex, Value: req.Mesh, Operator: index.Equals},
+		{IndexName: index.ByServiceProviderServiceKey, Value: req.ServiceKey(), Operator: index.Equals},
 	}
 }
 

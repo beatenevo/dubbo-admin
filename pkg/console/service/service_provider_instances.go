@@ -50,9 +50,9 @@ func GetServiceProviderInstances(ctx consolectx.Context, req model.BaseServiceRe
 		instanceList, err := manager.ListByIndexes[*meshresource.InstanceResource](
 			ctx.ResourceManager(),
 			meshresource.InstanceKind,
-			map[string]string{
-				index.ByMeshIndex:            req.Mesh,
-				index.ByInstanceAppNameIndex: providerAppName,
+			[]index.IndexCondition{
+				{IndexName: index.ByMeshIndex, Value: req.Mesh, Operator: index.Equals},
+				{IndexName: index.ByInstanceAppNameIndex, Value: providerAppName, Operator: index.Equals},
 			},
 		)
 		if err != nil {

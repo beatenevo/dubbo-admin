@@ -22,6 +22,7 @@ toolchain go1.24.11
 require (
 	dubbo.apache.org/dubbo-go/v3 v3.0.0-20260210015753-35ea886421f9
 	github.com/apache/dubbo-go-hessian2 v1.12.5
+	github.com/armon/go-radix v1.0.0
 	github.com/dubbogo/go-zookeeper v1.0.4-0.20211212162352-f9d2183d89d5
 	github.com/duke-git/lancet/v2 v2.3.6
 	github.com/envoyproxy/go-control-plane/envoy v1.32.4
