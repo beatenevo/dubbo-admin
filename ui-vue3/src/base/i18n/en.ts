@@ -172,6 +172,7 @@ const words: I18nType = {
     instanceName: 'InstanceName',
     ip: 'Ip',
     name: 'Name',
+    lifecycleState: 'Lifecycle State',
     deployState: 'Deploy State',
     deployCluster: 'Deploy Cluster',
     deployClusters: 'Deploy Clusters',
@@ -564,6 +565,7 @@ const words: I18nType = {
   dependentService: 'Dependent Service',
   submit: 'Submit',
   reset: 'Reset',
+  refresh: 'Refresh',
   router: {
     resource: {
       app: {
