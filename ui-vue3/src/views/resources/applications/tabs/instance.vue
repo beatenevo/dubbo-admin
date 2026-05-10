@@ -32,18 +32,31 @@
       </a-card>
     </a-flex>
     <search-table :search-domain="searchDomain">
-      <template #bodyCell="{ column, text }">
+      <template #bodyCell="{ column, text, record }">
         <template v-if="column.dataIndex === 'name'">
-          <a-button type="link" @click="viewDetail(text)">{{ text }}</a-button>
+          <a-tooltip :title="text">
+            <span class="app-link" @click="viewDetail(record)">{{ text }}</span>
+          </a-tooltip>
         </template>
         <template v-if="column.dataIndex === 'deployState'">
-          <a-tag :color="INSTANCE_DEPLOY_COLOR[text.toUpperCase()]">{{ text }}</a-tag>
+          <a-tag :color="INSTANCE_DEPLOY_COLOR[(text || 'UNKNOWN').toUpperCase()] || 'default'">
+            {{ text }}
+          </a-tag>
+        </template>
+        <template v-if="column.dataIndex === 'lifecycleState'">
+          <a-tag :color="INSTANCE_LIFECYCLE_COLOR[(text || 'UNKNOWN').toUpperCase()] || 'default'">
+            {{ text }}
+          </a-tag>
         </template>
         <template v-if="column.dataIndex === 'deployClusters'">
           <a-tag>{{ text }}</a-tag>
         </template>
         <template v-if="column.dataIndex === 'registerState'">
-          <a-tag :color="INSTANCE_REGISTER_COLOR[text.toUpperCase()]">{{ text }}</a-tag>
+          <a-tag
+            :color="INSTANCE_REGISTER_COLOR[(text || 'UNREGISTERED').toUpperCase()] || 'default'"
+          >
+            {{ text }}
+          </a-tag>
         </template>
         <template v-if="column.dataIndex === 'registerCluster'">
           <a-tag>{{ text }}</a-tag>
@@ -62,7 +75,12 @@
 
 <script setup lang="ts">
 import { onMounted, provide, reactive } from 'vue'
-import { INSTANCE_DEPLOY_COLOR, INSTANCE_REGISTER_COLOR, PRIMARY_COLOR } from '@/base/constants'
+import {
+  INSTANCE_DEPLOY_COLOR,
+  INSTANCE_LIFECYCLE_COLOR,
+  INSTANCE_REGISTER_COLOR,
+  PRIMARY_COLOR
+} from '@/base/constants'
 import { Icon } from '@iconify/vue'
 import SearchTable from '@/components/SearchTable.vue'
 import { SearchDomain } from '@/utils/SearchUtil'
@@ -110,67 +128,73 @@ onMounted(async () => {
 
 const columns = [
   {
-    title: 'instanceDomain.ip',
-    dataIndex: 'ip',
-    key: 'ip',
-    sorter: true,
-    width: 150,
-    fixed: 'left'
-  },
-  {
     title: 'instanceDomain.name',
     dataIndex: 'name',
     key: 'name',
-    sorter: true,
-    width: 180
+    // sorter: true,
+    width: 180,
+    fixed: 'left'
+  },
+  {
+    title: 'instanceDomain.ip',
+    dataIndex: 'ip',
+    key: 'ip',
+    // sorter: true,
+    width: 150
+  },
+  {
+    title: 'instanceDomain.lifecycleState',
+    dataIndex: 'lifecycleState',
+    key: 'lifecycleState',
+    width: 150
   },
   {
     title: 'instanceDomain.deployState',
     dataIndex: 'deployState',
     key: 'deployState',
-    sorter: true,
+    // sorter: true,
     width: 150
   },
   {
     title: 'instanceDomain.deployCluster',
     dataIndex: 'deployClusters',
     key: 'deployClusters',
-    sorter: true,
+    // sorter: true,
     width: 180
   },
   {
     title: 'instanceDomain.registerState',
     dataIndex: 'registerState',
     key: 'registerState',
-    sorter: true,
+    // sorter: true,
     width: 150
   },
   {
     title: 'instanceDomain.registerClusters',
     dataIndex: 'registerCluster',
     key: 'registerCluster',
-    sorter: true,
+    // sorter: true,
     width: 200
   },
   {
     title: 'instanceDomain.cpu',
     dataIndex: 'cpu',
     key: 'cpu',
-    sorter: true,
+    // sorter: true,
     width: 120
   },
   {
     title: 'instanceDomain.memory',
     dataIndex: 'memory',
     key: 'memory',
-    sorter: true,
+    // sorter: true,
     width: 120
   },
   {
     title: 'instanceDomain.startTime',
     dataIndex: 'startTime',
     key: 'startTime',
-    sorter: true,
+    // sorter: true,
     width: 150
   }
   // {
@@ -201,7 +225,7 @@ function instanceInfo(params: any) {
 * on (pod) group_left(pod_ip)
 kube_pod_info{pod_ip="${ip}"}`)
       instance.cpu = isNumber(cpu) ? cpu.toFixed(3) + 'u' : cpu
-      instance.memory = bytesToHuman(mem)
+      instance.memory = isNumber(mem) ? bytesToHuman(mem) : mem
     })
   })
 }
@@ -252,8 +276,8 @@ onMounted(() => {
   searchDomain.onSearch()
 })
 
-const viewDetail = (serviceName: string) => {
-  router.replace(`/resources/instances/detail/${serviceName.split(':')[0]}/${serviceName}`)
+const viewDetail = (record: any) => {
+  router.push(`/resources/instances/detail/${record.name}/${record.ip}/${record.appName}`)
 }
 
 provide(PROVIDE_INJECT_KEY.SEARCH_DOMAIN, searchDomain)

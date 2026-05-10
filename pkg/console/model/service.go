@@ -18,22 +18,28 @@
 package model
 
 import (
-	"strconv"
+	"encoding/json"
+	"fmt"
 	"strings"
 
-	"github.com/apache/dubbo-admin/api/mesh/v1alpha1"
-	"github.com/apache/dubbo-admin/pkg/console/constants"
+	"github.com/duke-git/lancet/v2/strutil"
+	"github.com/gin-gonic/gin"
+
+	"github.com/apache/dubbo-admin/pkg/common/constants"
+	coremodel "github.com/apache/dubbo-admin/pkg/core/resource/model"
 )
 
 type ServiceSearchReq struct {
+	coremodel.PageReq
+
 	ServiceName string `form:"serviceName" json:"serviceName"`
 	Keywords    string `form:"keywords" json:"keywords"`
-	PageReq
+	Mesh        string `form:"mesh" json:"mesh"`
 }
 
 func NewServiceSearchReq() *ServiceSearchReq {
 	return &ServiceSearchReq{
-		PageReq: PageReq{
+		PageReq: coremodel.PageReq{
 			PageOffset: 0,
 			PageSize:   15,
 		},
@@ -41,8 +47,10 @@ func NewServiceSearchReq() *ServiceSearchReq {
 }
 
 type ServiceSearchResp struct {
-	ServiceName   string         `json:"serviceName"`
-	VersionGroups []VersionGroup `json:"versionGroups"`
+	ServiceName     string `json:"serviceName"`
+	Version         string `json:"version"`
+	Group           string `json:"group"`
+	ConsumerAppName string `json:"consumerAppName,omitempty"`
 }
 
 type ByServiceName []*ServiceSearchResp
@@ -55,55 +63,14 @@ func (a ByServiceName) Less(i, j int) bool {
 
 func (a ByServiceName) Swap(i, j int) { a[i], a[j] = a[j], a[i] }
 
-type ServiceSearch struct {
-	ServiceName   string
-	VersionGroups Set
-}
-
-func (s *ServiceSearch) FromServiceInfo(info *v1alpha1.ServiceInfo) {
-	s.VersionGroups.Add(info.Version + " " + info.Group)
-}
-
-func NewServiceSearch(serviceName string) *ServiceSearch {
-	return &ServiceSearch{
-		ServiceName:   serviceName,
-		VersionGroups: NewSet(),
-	}
-}
-
-func NewServiceSearchResp() *ServiceSearchResp {
-	return &ServiceSearchResp{
-		ServiceName:   "",
-		VersionGroups: nil,
-	}
-}
-
-func NewServiceDistributionResp() *ServiceTabDistributionResp {
-	return &ServiceTabDistributionResp{
-		AppName:      "",
-		InstanceName: "",
-		Endpoint:     "",
-		TimeOut:      "",
-		Retries:      "",
-	}
-}
-
-func (s *ServiceSearchResp) FromServiceSearch(search *ServiceSearch) {
-	s.ServiceName = search.ServiceName
-	versionGroupList := make([]VersionGroup, 0)
-	for _, gv := range search.VersionGroups.Values() {
-		groupAndVersion := strings.Split(gv, " ")
-		versionGroupList = append(versionGroupList, VersionGroup{Version: groupAndVersion[0], Group: groupAndVersion[1]})
-	}
-	s.VersionGroups = versionGroupList
-}
-
 type ServiceTabDistributionReq struct {
 	ServiceName string `json:"serviceName"  form:"serviceName" binding:"required"`
 	Version     string `json:"version"  form:"version"`
 	Group       string `json:"group"  form:"group"`
 	Side        string `json:"side" form:"side"  binding:"required"`
-	PageReq
+	Mesh        string `json:"mesh" form:"mesh" binding:"required"`
+	Keywords    string `json:"keywords"  form:"keywords"`
+	coremodel.PageReq
 }
 
 type ServiceTabDistributionResp struct {
@@ -133,60 +100,139 @@ type ServiceTabDistribution struct {
 	Retries      string
 }
 
-func NewServiceDistribution() *ServiceTabDistribution {
-	return &ServiceTabDistribution{
-		AppName:      "",
-		InstanceName: "",
-		Endpoint:     "",
-		TimeOut:      "",
-		Retries:      "",
+type BaseServiceReq struct {
+	ServiceName string `json:"serviceName"`
+	Group       string `json:"group"`
+	Version     string `json:"version"`
+	Mesh        string `json:"mesh"`
+}
+
+func (s *BaseServiceReq) Query(c *gin.Context) error {
+	s.ServiceName = strings.TrimSpace(c.Query("serviceName"))
+	if strutil.IsBlank(s.ServiceName) {
+		return fmt.Errorf("service name is empty")
 	}
+	s.Group = strings.TrimSpace(c.Query("group"))
+	s.Version = strings.TrimSpace(c.Query("version"))
+	s.Mesh = strings.TrimSpace(c.Query("mesh"))
+	return nil
 }
 
-func (r *ServiceTabDistributionResp) FromServiceDataplaneResource(dataplane *coremesh.DataplaneResource, metadata *coremesh.MetaDataResource, name string, req *ServiceTabDistributionReq) *ServiceTabDistributionResp {
-	r.AppName = name
-	inbounds := dataplane.Spec.Networking.Inbound
-	ip := dataplane.GetIP()
-	for _, inbound := range inbounds {
-		r.mergeInbound(inbound, ip)
+func (s *BaseServiceReq) ServiceKey() string {
+	return s.ServiceName + constants.ColonSeparator + s.Version + constants.ColonSeparator + s.Group
+}
+
+type ServiceMethodDetailReq struct {
+	BaseServiceReq
+
+	MethodName string `form:"methodName" json:"methodName"`
+	Signature  string `form:"signature" json:"signature"`
+}
+
+func (s *ServiceMethodDetailReq) Query(c *gin.Context) error {
+	if err := s.BaseServiceReq.Query(c); err != nil {
+		return err
 	}
-	meta := dataplane.GetMeta()
-	r.InstanceName = meta.GetName()
-	r.mergeMetaData(metadata, req)
-
-	return r
-}
-
-func (r *ServiceTabDistributionResp) mergeInbound(inbound *legacy.Dataplane_Networking_Inbound, ip string) {
-	r.Endpoint = ip + ":" + strconv.Itoa(int(inbound.Port))
-}
-
-func (r *ServiceTabDistributionResp) FromServiceDistribution(distribution *ServiceTabDistribution) *ServiceTabDistributionResp {
-	r.AppName = distribution.AppName
-	r.InstanceName = distribution.InstanceName
-	r.Endpoint = distribution.Endpoint
-	r.TimeOut = distribution.TimeOut
-	r.Retries = distribution.Retries
-	return r
-}
-
-func (r *ServiceTabDistributionResp) mergeMetaData(metadata *coremesh.MetaDataResource, req *ServiceTabDistributionReq) {
-	// key format is '{group}/{interface name}:{version}:{protocol}'
-	serviceinfos := metadata.Spec.Services
-
-	for _, serviceinfo := range serviceinfos {
-		if serviceinfo.Name == req.ServiceName &&
-			serviceinfo.Group == req.Group &&
-			serviceinfo.Version == req.Version &&
-			req.Side == serviceinfo.GetParams()[constants.ServiceInfoSide] {
-			r.Retries = serviceinfo.Params[constants.RetriesKey]
-			r.TimeOut = serviceinfo.Params[constants.TimeoutKey]
-			r.Params = serviceinfo.Params
-		}
+	s.MethodName = strings.TrimSpace(c.Query("methodName"))
+	if strutil.IsBlank(s.MethodName) {
+		return fmt.Errorf("method name is empty")
 	}
+	s.Signature = strings.TrimSpace(c.Query("signature"))
+	if strutil.IsBlank(s.Signature) {
+		return fmt.Errorf("signature is empty")
+	}
+	return nil
 }
 
-type VersionGroup struct {
-	Version string `json:"version"`
-	Group   string `json:"group"`
+type ServiceMethodSummaryResp struct {
+	MethodName     string   `json:"methodName"`
+	ParameterTypes []string `json:"parameterTypes"`
+	Signature      string   `json:"signature,omitempty"`
+}
+
+type ServiceMethodParameter struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
+type ServiceMethodDetailResp struct {
+	MethodName     string                   `json:"methodName"`
+	Signature      string                   `json:"signature,omitempty"`
+	ParameterTypes []string                 `json:"parameterTypes"`
+	Parameters     []ServiceMethodParameter `json:"parameters"`
+	ReturnType     string                   `json:"returnType"`
+	Types          []ServiceMethodTypeResp  `json:"types"`
+}
+
+type ServiceMethodTypeResp struct {
+	Type       string            `json:"type"`
+	Properties map[string]string `json:"properties"`
+	Items      []string          `json:"items"`
+	Enums      []string          `json:"enums"`
+}
+
+const DefaultServiceGenericInvokeTimeoutMs int64 = 3000
+
+type ServiceGenericInvokeReq struct {
+	BaseServiceReq
+
+	InstanceName string            `json:"instanceName"`
+	MethodName   string            `json:"methodName"`
+	Signature    string            `json:"signature"`
+	Args         []json.RawMessage `json:"args"`
+	TimeoutMs    int64             `json:"timeoutMs"`
+	Attachments  map[string]string `json:"attachments"`
+}
+
+func (s *ServiceGenericInvokeReq) Validate() error {
+	s.Mesh = strings.TrimSpace(s.Mesh)
+	if strutil.IsBlank(s.Mesh) {
+		return fmt.Errorf("mesh is empty")
+	}
+
+	s.ServiceName = strings.TrimSpace(s.ServiceName)
+	if strutil.IsBlank(s.ServiceName) {
+		return fmt.Errorf("service name is empty")
+	}
+
+	s.MethodName = strings.TrimSpace(s.MethodName)
+	if strutil.IsBlank(s.MethodName) {
+		return fmt.Errorf("method name is empty")
+	}
+
+	s.Signature = strings.TrimSpace(s.Signature)
+	if strutil.IsBlank(s.Signature) {
+		return fmt.Errorf("signature is empty")
+	}
+
+	s.InstanceName = strings.TrimSpace(s.InstanceName)
+	if strutil.IsBlank(s.InstanceName) {
+		return fmt.Errorf("instance name is empty")
+	}
+
+	s.Group = strings.TrimSpace(s.Group)
+	s.Version = strings.TrimSpace(s.Version)
+
+	if s.TimeoutMs <= 0 {
+		s.TimeoutMs = DefaultServiceGenericInvokeTimeoutMs
+	}
+
+	return nil
+}
+
+type ServiceGenericInvokeResp struct {
+	ElapsedMs int64 `json:"elapsedMs"`
+	RawResult any   `json:"rawResult"`
+}
+
+type ServiceDetailReq struct {
+	ServiceName string `form:"serviceName" json:"serviceName" binding:"required"`
+	Version     string `form:"version" json:"version"`
+	Group       string `form:"group" json:"group"`
+	Mesh        string `form:"mesh" json:"mesh" binding:"required"`
+}
+
+type ServiceDetailResp struct {
+	Language string   `json:"language"`
+	Methods  []string `json:"methods"`
 }

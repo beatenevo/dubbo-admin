@@ -25,11 +25,6 @@ import (
 )
 
 func InitRouter(r *gin.Engine, ctx consolectx.Context) {
-	grafanaRouter := r.Group("/grafana")
-	{
-		grafanaRouter.Any("/*any", handler.Grafana(ctx))
-	}
-
 	router := r.Group("/api/v1")
 	{
 		prometheus := router.Group("/promQL")
@@ -54,8 +49,8 @@ func InitRouter(r *gin.Engine, ctx consolectx.Context) {
 			instanceConfig.GET("/operatorLog", handler.InstanceConfigOperatorLogGET(ctx))
 			instanceConfig.PUT("/operatorLog", handler.InstanceConfigOperatorLogPUT(ctx))
 		}
-		instance.GET("/metric-dashboard", handler.GetMetricDashBoard(ctx, handler.InstanceDimension))
-		instance.GET("/trace-dashboard", handler.GetTraceDashBoard(ctx, handler.InstanceDimension))
+		instance.GET("/metric-dashboard", handler.GetGrafanaDashboard(ctx, handler.InstanceDimension, handler.MetricDashboard))
+		instance.GET("/trace-dashboard", handler.GetGrafanaDashboard(ctx, handler.InstanceDimension, handler.TraceDashboard))
 		instance.GET("/metrics-list", handler.GetMetricsList(ctx))
 	}
 
@@ -65,10 +60,11 @@ func InitRouter(r *gin.Engine, ctx consolectx.Context) {
 		application.GET("/instance/info", handler.GetApplicationTabInstanceInfo(ctx))
 		application.GET("/service/form", handler.GetApplicationServiceForm(ctx))
 		application.GET("/search", handler.ApplicationSearch(ctx))
+		application.GET("/graph", handler.GetApplicationGraph(ctx))
 		{
 			applicationConfig := application.Group("/config")
-			applicationConfig.PUT("/operatorLog", handler.ApplicationConfigOperatorLogPut(ctx))
-			applicationConfig.GET("/operatorLog", handler.ApplicationConfigOperatorLogGet(ctx))
+			applicationConfig.PUT("/operatorLog", handler.ApplicationConfigAccessLogPut(ctx))
+			applicationConfig.GET("/operatorLog", handler.ApplicationConfigAccessLogGet(ctx))
 
 			applicationConfig.GET("/flowWeight", handler.ApplicationConfigFlowWeightGET(ctx))
 			applicationConfig.PUT("/flowWeight", handler.ApplicationConfigFlowWeightPUT(ctx))
@@ -76,8 +72,8 @@ func InitRouter(r *gin.Engine, ctx consolectx.Context) {
 			applicationConfig.GET("/gray", handler.ApplicationConfigGrayGET(ctx))
 			applicationConfig.PUT("/gray", handler.ApplicationConfigGrayPUT(ctx))
 		}
-		application.GET("/metric-dashboard", handler.GetMetricDashBoard(ctx, handler.AppDimension))
-		application.GET("/trace-dashboard", handler.GetTraceDashBoard(ctx, handler.AppDimension))
+		application.GET("/metric-dashboard", handler.GetGrafanaDashboard(ctx, handler.AppDimension, handler.MetricDashboard))
+		application.GET("/trace-dashboard", handler.GetGrafanaDashboard(ctx, handler.AppDimension, handler.TraceDashboard))
 	}
 
 	{
@@ -96,14 +92,19 @@ func InitRouter(r *gin.Engine, ctx consolectx.Context) {
 			serviceConfig.GET("/argumentRoute", handler.ServiceConfigArgumentRouteGET(ctx))
 			serviceConfig.PUT("/argumentRoute", handler.ServiceConfigArgumentRoutePUT(ctx))
 		}
-		service.GET("/metric-dashboard", handler.GetMetricDashBoard(ctx, handler.ServiceDimension))
-		service.GET("/trace-dashboard", handler.GetTraceDashBoard(ctx, handler.ServiceDimension))
+		service.GET("/metric-dashboard", handler.GetGrafanaDashboard(ctx, handler.ServiceDimension, handler.MetricDashboard))
+		service.GET("/trace-dashboard", handler.GetGrafanaDashboard(ctx, handler.ServiceDimension, handler.TraceDashboard))
 	}
 
 	{
 		service := router.Group("/service")
+		service.POST("/generic/invoke", handler.ServiceGenericInvoke(ctx))
+		service.GET("/method/detail", handler.GetServiceMethodDetail(ctx))
 		service.GET("/distribution", handler.GetServiceTabDistribution(ctx))
+		service.GET("/provider-instances", handler.GetServiceProviderInstances(ctx))
+		service.GET("/methods", handler.GetServiceMethodNames(ctx))
 		service.GET("/search", handler.SearchServices(ctx))
+		service.GET("/graph", handler.GetServiceGraph(ctx))
 		service.GET("/detail", handler.GetServiceDetail(ctx))
 		service.GET("/interfaces", handler.GetServiceInterfaces(ctx))
 	}
@@ -139,4 +140,5 @@ func InitRouter(r *gin.Engine, ctx consolectx.Context) {
 	router.GET("/search", handler.BannerGlobalSearch(ctx))
 	router.GET("/overview", handler.ClusterOverview(ctx))
 	router.GET("/metadata", handler.AdminMetadata(ctx))
+	router.GET("/meshes", handler.ListMeshes(ctx))
 }

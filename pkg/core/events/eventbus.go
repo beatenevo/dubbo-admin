@@ -18,86 +18,106 @@
 package events
 
 import (
-	"sync"
+	"fmt"
 
-	"github.com/apache/dubbo-admin/pkg/core"
+	"github.com/duke-git/lancet/v2/convertor"
+	"k8s.io/client-go/tools/cache"
+
+	"github.com/apache/dubbo-admin/pkg/core/resource/model"
 )
 
-var log = core.Log.WithName("eventbus")
-
-type subscriber struct {
-	ch         chan Event
-	predicates []Predicate
+type Event interface {
+	// Type returns the type of the event, see definitions in cache.DeltaType
+	Type() cache.DeltaType
+	// OldObj returns the old object, nil if old object doesn't exist in store
+	OldObj() model.Resource
+	// NewObj returns the new object, nil if event type is in [cache.Deleted]
+	NewObj() model.Resource
+	// Context returns the context of the event, if event provider want to pass extra info to the consumer, just use context
+	Context() map[string]string
+	// String returns the string representation of the event
+	String() string
 }
 
-func NewEventBus(bufferSize uint) (EventBus, error) {
-	return &eventBus{
-		subscribers: map[string]subscriber{},
-		bufferSize:  bufferSize,
-	}, nil
+type Subscriber interface {
+	ResourceKind() model.ResourceKind
+
+	Name() string
+
+	ProcessEvent(event Event) error
+
+	// AsyncEnabled controls whether this subscriber should be dispatched asynchronously.
+	//
+	// Return true when the subscriber may execute relatively slow logic and should not
+	// block EventBus.Send(). In async mode, EventBus enqueues events into a buffered
+	// channel and processes them in a dedicated drainer goroutine.
+	//
+	// Async dispatch is best-effort: when the subscriber queue is full, new events are
+	// dropped with a warning log.
+	AsyncEnabled() bool
 }
 
-type eventBus struct {
-	mtx         sync.RWMutex
-	subscribers map[string]subscriber
-	bufferSize  uint
+type Subscribers []Subscriber
+
+type ResourceChangedEvent struct {
+	typ     cache.DeltaType
+	oldObj  model.Resource
+	newObj  model.Resource
+	context map[string]string
 }
 
-// Subscribe subscribes to a stream of events given Predicates
-// Predicate should not block on I/O, otherwise the whole event bus can block.
-// All predicates must pass for the event to enqueued.
-func (b *eventBus) Subscribe(predicates ...Predicate) Listener {
-	id := core.NewUUID()
-	b.mtx.Lock()
-	defer b.mtx.Unlock()
+var _ Event = &ResourceChangedEvent{}
 
-	events := make(chan Event, b.bufferSize)
-	b.subscribers[id] = subscriber{
-		ch:         events,
-		predicates: predicates,
-	}
-	return &reader{
-		events: events,
-		close: func() {
-			b.mtx.Lock()
-			defer b.mtx.Unlock()
-			delete(b.subscribers, id)
-		},
-	}
-}
-
-func (b *eventBus) Send(event Event) {
-	b.mtx.RLock()
-	defer b.mtx.RUnlock()
-	for _, sub := range b.subscribers {
-		matched := true
-		for _, predicate := range sub.predicates {
-			if !predicate(event) {
-				matched = false
-			}
-		}
-		if matched {
-			select {
-			case sub.ch <- event:
-			default:
-				log.Info("[WARNING] event is not sent because the channel is full. Ignoring event. Consider increasing buffer size using dubbo_EVENT_BUS_BUFFER_SIZE",
-					"bufferSize", b.bufferSize,
-					"event", event,
-				)
-			}
-		}
+func NewResourceChangedEvent(typ cache.DeltaType, oldObj model.Resource, newObj model.Resource) *ResourceChangedEvent {
+	return &ResourceChangedEvent{
+		typ:     typ,
+		oldObj:  oldObj,
+		newObj:  newObj,
+		context: map[string]string{},
 	}
 }
 
-type reader struct {
-	events chan Event
-	close  func()
+func NewResourceChangedEventWithContext(typ cache.DeltaType, oldObj model.Resource,
+	newObj model.Resource, ctx map[string]string) *ResourceChangedEvent {
+	return &ResourceChangedEvent{
+		typ:     typ,
+		oldObj:  oldObj,
+		newObj:  newObj,
+		context: ctx,
+	}
 }
 
-func (k *reader) Recv() <-chan Event {
-	return k.events
+func (e *ResourceChangedEvent) Type() cache.DeltaType {
+	return e.typ
 }
 
-func (k *reader) Close() {
-	k.close()
+func (e *ResourceChangedEvent) OldObj() model.Resource {
+	return e.oldObj
+}
+
+func (e *ResourceChangedEvent) NewObj() model.Resource {
+	return e.newObj
+}
+
+func (e *ResourceChangedEvent) Context() map[string]string {
+	return e.context
+}
+
+func (e *ResourceChangedEvent) String() string {
+	return fmt.Sprintf("\n[type]: %s, \n[oldObj]: %s, \n[newObj]: %s",
+		e.typ, convertor.ToString(e.oldObj), convertor.ToString(e.newObj))
+}
+
+type Emitter interface {
+	Send(event Event)
+}
+
+type SubscriptionManager interface {
+	Subscribe(subscriber Subscriber) error
+	Unsubscribe(subscriber Subscriber) error
+}
+
+type EventBus interface {
+	Emitter
+	SubscriptionManager
 }

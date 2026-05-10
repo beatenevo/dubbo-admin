@@ -18,31 +18,36 @@
 package model
 
 import (
-	gxset "github.com/dubbogo/gost/container/set"
+	"github.com/duke-git/lancet/v2/strutil"
 
 	meshproto "github.com/apache/dubbo-admin/api/mesh/v1alpha1"
+	"github.com/apache/dubbo-admin/pkg/config/app"
+	meshresource "github.com/apache/dubbo-admin/pkg/core/resource/apis/mesh/v1alpha1"
 	coremodel "github.com/apache/dubbo-admin/pkg/core/resource/model"
 )
 
 type SearchInstanceReq struct {
+	coremodel.PageReq
+
 	AppName  string `form:"appName"`
 	Keywords string `form:"keywords"`
-	PageReq
+	Mesh     string `form:"mesh"`
 }
 
 func NewSearchInstanceReq() *SearchInstanceReq {
 	return &SearchInstanceReq{
-		PageReq: PageReq{PageSize: 15},
+		PageReq: coremodel.PageReq{PageSize: 15},
 	}
 }
 
 type InstanceDetailReq struct {
 	InstanceName string `form:"instanceName"`
+	Mesh         string `form:"mesh"`
 }
 
 type SearchPaginationResult struct {
-	List     any                   `json:"list"`
-	PageInfo *coremodel.Pagination `json:"pageInfo"`
+	List     any                  `json:"list"`
+	PageInfo coremodel.Pagination `json:"pageInfo"`
 }
 
 func NewSearchPaginationResult() *SearchPaginationResult {
@@ -50,67 +55,44 @@ func NewSearchPaginationResult() *SearchPaginationResult {
 }
 
 type SearchInstanceResp struct {
-	Ip                  string            `json:"ip"`
-	Name                string            `json:"name"`
-	WorkloadName        string            `json:"workloadName"`
-	AppName             string            `json:"appName"`
-	DeployState         string            `json:"deployState"`
-	DeployCluster       string            `json:"deployCluster"`
-	RegisterState       string            `json:"registerState"`
-	RegisterClustersSet *gxset.HashSet    `json:"-"`
-	RegisterClusters    []string          `json:"registerClusters"`
-	CreateTime          string            `json:"createTime"`
-	RegisterTime        string            `json:"registerTime"` // TODO: not converted
-	Labels              map[string]string `json:"labels"`
+	Ip               string                 `json:"ip"`
+	Name             string                 `json:"name"`
+	WorkloadName     string                 `json:"workloadName"`
+	AppName          string                 `json:"appName"`
+	LifecycleState   InstanceLifecycleState `json:"lifecycleState"`
+	DeployState      InstanceDeployState    `json:"deployState"`
+	DeployCluster    string                 `json:"deployCluster"`
+	RegisterState    InstanceRegisterState  `json:"registerState"`
+	RegisterClusters []string               `json:"registerClusters"`
+	CreateTime       string                 `json:"createTime"`
+	RegisterTime     string                 `json:"registerTime"`
+	Labels           map[string]string      `json:"labels"`
 }
 
 func NewSearchInstanceResp() *SearchInstanceResp {
 	return &SearchInstanceResp{
-		RegisterClustersSet: gxset.NewSet(),
-		RegisterClusters:    make([]string, 0),
+		RegisterClusters: make([]string, 0),
 	}
 }
 
-func (r *SearchInstanceResp) FromDataplaneResource(dr *mesh.DataplaneResource) *SearchInstanceResp {
-	// TODO: support more fields
-	r.Ip = dr.GetIP()
-	meta := dr.GetMeta()
-	r.Name = meta.GetName()
-	r.CreateTime = meta.GetCreationTime().String()
-	r.RegisterTime = r.CreateTime // TODO: separate createTime and RegisterTime
-	cluster := dr.Spec.Networking.Inbound[0].Tags[legacy.ZoneTag]
-	r.RegisterClustersSet.Add(cluster)
-	for _, c := range r.RegisterClustersSet.Values() {
-		r.RegisterClusters = append(r.RegisterClusters, c.(string))
+func (r *SearchInstanceResp) FromInstanceResource(instanceResource *meshresource.InstanceResource, cfg app.AdminConfig) *SearchInstanceResp {
+	instance := instanceResource.Spec
+	r.Ip = instance.Ip
+	r.Name = instance.Name
+	r.CreateTime = instance.CreateTime
+	r.RegisterTime = instance.RegisterTime
+	if d := cfg.FindDiscovery(instanceResource.Mesh); d != nil {
+		r.RegisterClusters = []string{d.Name}
 	}
-	r.DeployCluster = cluster
-	if r.RegisterTime != "" {
-		r.RegisterState = "Registed"
-	} else {
-		r.RegisterState = "UnRegisted"
+	if cfg.Engine != nil && cfg.Engine.ID == instance.SourceEngine {
+		r.DeployCluster = cfg.Engine.Name
 	}
-	// label conversion
-	r.Labels = meta.GetLabels()
-	// spec conversion
-	spec := dr.Spec
-	{
-		statusValue := spec.Extensions[coremodel.ExtensionsPodPhaseKey]
-		if v, ok := spec.Extensions[coremodel.ExtensionsPodStatusKey]; ok {
-			statusValue = v
-		}
-		if v, ok := spec.Extensions[coremodel.ExtensionsContainerStatusReasonKey]; ok {
-			statusValue = v
-		}
-		r.DeployState = statusValue
-		r.WorkloadName = spec.Extensions[coremodel.ExtensionsWorkLoadKey]
-		// name field source is different between universal and k8s mode
-		r.AppName = spec.Extensions[meshproto.Application]
-		if r.AppName == "" {
-			for _, inbound := range spec.Networking.Inbound {
-				r.AppName = inbound.Tags[legacy.AppTag]
-			}
-		}
-	}
+	r.RegisterState = DeriveInstanceRegisterState(instance)
+	r.Labels = instance.Tags
+	r.DeployState = DeriveInstanceDeployState(instance)
+	r.LifecycleState = DeriveInstanceLifecycleState(instance, r.DeployState, r.RegisterState)
+	r.WorkloadName = instance.WorkloadName
+	r.AppName = instance.AppName
 	return r
 }
 
@@ -121,179 +103,205 @@ type State struct {
 	Value string `json:"value"`
 }
 
+// InstanceDeployState describes the runtime deployment state reported by the platform.
+type InstanceDeployState string
+
+const (
+	// InstanceDeployStateUnknown indicates the deployment state cannot be derived from runtime metadata.
+	InstanceDeployStateUnknown InstanceDeployState = "Unknown"
+	// InstanceDeployStatePending indicates the workload has been accepted but is not running yet.
+	InstanceDeployStatePending InstanceDeployState = "Pending"
+	// InstanceDeployStateStarting indicates the workload is running but not ready to serve.
+	InstanceDeployStateStarting InstanceDeployState = "Starting"
+	// InstanceDeployStateRunning indicates the workload is running and ready.
+	InstanceDeployStateRunning InstanceDeployState = "Running"
+	// InstanceDeployStateTerminating indicates the workload is shutting down.
+	InstanceDeployStateTerminating InstanceDeployState = "Terminating"
+	// InstanceDeployStateFailed indicates the workload has failed.
+	InstanceDeployStateFailed InstanceDeployState = "Failed"
+	// InstanceDeployStateSucceeded indicates the workload has completed successfully and exited.
+	InstanceDeployStateSucceeded InstanceDeployState = "Succeeded"
+	// InstanceDeployStateCrashing indicates the workload is repeatedly crashing or restarting.
+	InstanceDeployStateCrashing InstanceDeployState = "Crashing"
+)
+
+// InstanceRegisterState describes whether the instance is visible to the registry.
+type InstanceRegisterState string
+
+const (
+	// InstanceRegisterStateRegistered indicates the instance has been registered to the registry.
+	InstanceRegisterStateRegistered InstanceRegisterState = "Registered"
+	// InstanceRegisterStateUnregistered indicates the instance has not registered yet or has been removed.
+	InstanceRegisterStateUnregistered InstanceRegisterState = "UnRegistered"
+)
+
+// InstanceLifecycleState describes the user-facing lifecycle synthesized from deploy/register signals.
+type InstanceLifecycleState string
+
+const (
+	// InstanceLifecycleStateStarting indicates the instance is still warming up.
+	InstanceLifecycleStateStarting InstanceLifecycleState = "Starting"
+	// InstanceLifecycleStateServing indicates the instance is both running and registered.
+	InstanceLifecycleStateServing InstanceLifecycleState = "Serving"
+	// InstanceLifecycleStateDraining indicates the instance is running but has started unregistering.
+	InstanceLifecycleStateDraining InstanceLifecycleState = "Draining"
+	// InstanceLifecycleStateTerminating indicates the instance is shutting down.
+	InstanceLifecycleStateTerminating InstanceLifecycleState = "Terminating"
+	// InstanceLifecycleStateError indicates the instance is in an unexpected or failed state.
+	InstanceLifecycleStateError InstanceLifecycleState = "Error"
+	// InstanceLifecycleStateUnknown indicates the lifecycle cannot be inferred from current signals.
+	InstanceLifecycleStateUnknown InstanceLifecycleState = "Unknown"
+)
+
 type InstanceDetailResp struct {
-	RpcPort          int               `json:"rpcPort"`
-	Ip               string            `json:"ip"`
-	AppName          string            `json:"appName"`
-	WorkloadName     string            `json:"workloadName"`
-	Labels           map[string]string `json:"labels"`
-	CreateTime       string            `json:"createTime"`
-	ReadyTime        string            `json:"readyTime"`
-	RegisterTime     string            `json:"registerTime"`
-	RegisterClusters []string          `json:"registerClusters"`
-	DeployCluster    string            `json:"deployCluster"`
-	DeployState      string            `json:"deployState"`
-	RegisterState    string            `json:"registerState"`
-	Node             string            `json:"node"`
-	Image            string            `json:"image"`
-	Probes           ProbeStruct       `json:"probes"`
-	Tags             map[string]string `json:"tags"`
+	RpcPort          int64                  `json:"rpcPort"`
+	Ip               string                 `json:"ip"`
+	AppName          string                 `json:"appName"`
+	WorkloadName     string                 `json:"workloadName"`
+	Labels           map[string]string      `json:"labels"`
+	CreateTime       string                 `json:"createTime"`
+	ReadyTime        string                 `json:"readyTime"`
+	RegisterTime     string                 `json:"registerTime"`
+	RegisterClusters []string               `json:"registerClusters"`
+	DeployCluster    string                 `json:"deployCluster"`
+	LifecycleState   InstanceLifecycleState `json:"lifecycleState"`
+	DeployState      InstanceDeployState    `json:"deployState"`
+	RegisterState    InstanceRegisterState  `json:"registerState"`
+	Node             string                 `json:"node"`
+	Image            string                 `json:"image"`
+	Probes           ProbeStruct            `json:"probes"`
+	Tags             map[string]string      `json:"tags"`
 }
+
+const (
+	StartupProbeType   = "startup"
+	ReadinessProbeType = "readiness"
+	LivenessProbeType  = "liveness"
+)
 
 type ProbeStruct struct {
-	StartupProbe   StartupProbe   `json:"startupProbe"`
-	ReadinessProbe ReadinessProbe `json:"readinessProbe"`
-	LivenessProbe  LivenessProbe  `json:"livenessProbe"`
+	StartupProbe   Probe `json:"startupProbe"`
+	ReadinessProbe Probe `json:"readinessProbe"`
+	LivenessProbe  Probe `json:"livenessProbe"`
 }
 
-type StartupProbe struct {
+type Probe struct {
 	Type string `json:"type"`
-	Port int    `json:"port"`
-	Open bool   `json:"open"`
-}
-type ReadinessProbe struct {
-	Type string `json:"type"`
-	Port int    `json:"port"`
-	Open bool   `json:"open"`
-}
-type LivenessProbe struct {
-	Type string `json:"type"`
-	Port int    `json:"port"`
+	Port int32  `json:"port"`
 	Open bool   `json:"open"`
 }
 
-func (r *InstanceDetailResp) FromInstanceDetail(id *InstanceDetail) *InstanceDetailResp {
-	r.AppName = id.AppName
-	r.RpcPort = id.RpcPort
-	r.Ip = id.Ip
-	r.WorkloadName = id.WorkloadName
-	r.Labels = id.Labels
-	r.CreateTime = id.CreateTime
-	r.ReadyTime = id.ReadyTime
-	r.RegisterTime = id.RegisterTime
-	r.RegisterClusters = id.RegisterClusters.Values()
-	r.DeployCluster = id.DeployCluster
-	r.DeployCluster = id.DeployCluster
-	r.DeployState = id.DeployState
-	r.Node = id.Node
-	r.Image = id.Image
-	r.Tags = id.Tags
-	r.RegisterState = id.RegisterState
-	r.Probes = id.Probes
+func FromInstanceResource(res *meshresource.InstanceResource, cfg app.AdminConfig) *InstanceDetailResp {
+	r := &InstanceDetailResp{}
+	instance := res.Spec
+	r.RpcPort = instance.RpcPort
+	r.Ip = instance.Ip
+	r.AppName = instance.AppName
+	r.WorkloadName = instance.WorkloadName
+	r.Labels = instance.Tags
+	r.CreateTime = instance.CreateTime
+	r.ReadyTime = instance.ReadyTime
+	r.RegisterTime = instance.RegisterTime
+	if d := cfg.FindDiscovery(res.Mesh); d != nil {
+		r.RegisterClusters = []string{d.Name}
+	}
+	if cfg.Engine.ID == res.Spec.SourceEngine {
+		r.DeployCluster = cfg.Engine.Name
+	}
+	r.DeployState = DeriveInstanceDeployState(instance)
+	r.RegisterState = DeriveInstanceRegisterState(instance)
+	r.LifecycleState = DeriveInstanceLifecycleState(instance, r.DeployState, r.RegisterState)
+	r.Node = instance.Node
+	r.Image = instance.Image
+	r.Probes = ProbeStruct{}
+	for _, p := range instance.Probes {
+		switch p.Type {
+		case StartupProbeType:
+			r.Probes.StartupProbe = Probe{
+				Type: StartupProbeType,
+				Port: p.Port,
+				Open: true,
+			}
+		case ReadinessProbeType:
+			r.Probes.ReadinessProbe = Probe{
+				Type: ReadinessProbeType,
+				Port: p.Port,
+				Open: true,
+			}
+		case LivenessProbeType:
+			r.Probes.LivenessProbe = Probe{
+				Type: LivenessProbeType,
+				Port: p.Port,
+				Open: true,
+			}
+		}
+
+	}
 	return r
 }
 
-type InstanceDetail struct {
-	RpcPort          int
-	Ip               string
-	AppName          string
-	WorkloadName     string
-	Labels           map[string]string
-	CreateTime       string
-	ReadyTime        string
-	RegisterTime     string
-	RegisterState    string
-	RegisterClusters Set
-	DeployCluster    string
-	DeployState      string
-	Node             string
-	Image            string
-	Tags             map[string]string
-	Probes           ProbeStruct
-}
-
-func NewInstanceDetail() *InstanceDetail {
-	return &InstanceDetail{
-		RpcPort:          -1,
-		Ip:               "",
-		AppName:          "",
-		WorkloadName:     "",
-		Labels:           nil,
-		CreateTime:       "",
-		ReadyTime:        "",
-		RegisterTime:     "",
-		RegisterClusters: NewSet(),
-		DeployCluster:    "",
-		Node:             "",
-		Image:            "",
+func DeriveInstanceDeployState(instance *meshproto.Instance) InstanceDeployState {
+	if instance == nil || strutil.IsBlank(instance.DeployState) {
+		return InstanceDeployStateUnknown
+	}
+	deployState := InstanceDeployState(instance.DeployState)
+	switch deployState {
+	case InstanceDeployStateRunning:
+		if !isPodReady(instance) {
+			return InstanceDeployStateStarting
+		}
+		return InstanceDeployStateRunning
+	default:
+		return deployState
 	}
 }
 
-func (a *InstanceDetail) Merge(dataplane *mesh.DataplaneResource) {
-	// TODO: support more fields
-	inbounds := dataplane.Spec.Networking.Inbound
-	for _, inbound := range inbounds {
-		a.mergeInbound(inbound)
+func DeriveInstanceRegisterState(instance *meshproto.Instance) InstanceRegisterState {
+	if instance == nil || strutil.IsBlank(instance.RegisterTime) {
+		return InstanceRegisterStateUnregistered
 	}
-	meta := dataplane.Meta
-	a.mergeMeta(meta)
-	extensions := dataplane.Spec.Extensions
-	a.mergeExtensions(extensions)
-	probes := dataplane.Spec.Probes
-	a.mergeProbes(probes)
+	return InstanceRegisterStateRegistered
+}
 
-	a.Ip = dataplane.GetIP()
-	if a.RegisterTime != "" {
-		a.RegisterState = "Registed"
-	} else {
-		a.RegisterState = "UnRegisted"
+func DeriveInstanceLifecycleState(
+	instance *meshproto.Instance,
+	deployState InstanceDeployState,
+	registerState InstanceRegisterState,
+) InstanceLifecycleState {
+	switch deployState {
+	case InstanceDeployStateCrashing, InstanceDeployStateFailed, InstanceDeployStateUnknown, InstanceDeployStateSucceeded:
+		return InstanceLifecycleStateError
+	case InstanceDeployStateTerminating:
+		return InstanceLifecycleStateTerminating
+	}
+
+	if registerState == InstanceRegisterStateRegistered {
+		if deployState == InstanceDeployStateRunning {
+			return InstanceLifecycleStateServing
+		}
+		return InstanceLifecycleStateError
+	}
+
+	if instance != nil && deployState == InstanceDeployStateRunning && strutil.IsNotBlank(instance.UnregisterTime) {
+		return InstanceLifecycleStateDraining
+	}
+
+	switch deployState {
+	case InstanceDeployStatePending, InstanceDeployStateStarting, InstanceDeployStateRunning:
+		return InstanceLifecycleStateStarting
+	default:
+		return InstanceLifecycleStateUnknown
 	}
 }
 
-func (a *InstanceDetail) mergeInbound(inbound *legacy.Dataplane_Networking_Inbound) {
-	a.RpcPort = int(inbound.Port)
-	a.RegisterClusters.Add(inbound.Tags[legacy.ZoneTag])
-	for _, deployCluster := range a.RegisterClusters.Values() {
-		a.DeployCluster = deployCluster // TODO: separate deployCluster and registerCluster
+func isPodReady(instance *meshproto.Instance) bool {
+	for _, condition := range instance.Conditions {
+		if condition == nil {
+			continue
+		}
+		if condition.Type == "Ready" {
+			return condition.Status == "True"
+		}
 	}
-	a.Tags = inbound.Tags
-	if a.AppName == "" {
-		a.AppName = inbound.Tags[legacy.AppTag]
-	}
-}
-
-func (a *InstanceDetail) mergeExtensions(extensions map[string]string) {
-	image := extensions[coremodel.ExtensionsImageKey]
-	a.Image = image
-	if a.AppName == "" {
-		a.AppName = extensions[meshproto.Application]
-	}
-	a.WorkloadName = extensions[coremodel.ExtensionsWorkLoadKey]
-	a.DeployState = extensions[coremodel.ExtensionsPodPhaseKey]
-	a.Node = extensions[coremodel.ExtensionsNodeNameKey]
-}
-
-func (a *InstanceDetail) mergeMeta(meta coremodel.ResourceMeta) {
-	a.CreateTime = meta.GetCreationTime().String()
-	a.RegisterTime = meta.GetModificationTime().String() // Not sure if it's the right field
-	a.ReadyTime = a.RegisterTime
-	// TODO: separate createTime , RegisterTime and ReadyTime
-	a.Labels = meta.GetLabels()
-}
-
-func (a *InstanceDetail) mergeProbes(probes *legacy.Dataplane_Probes) {
-	if probes == nil {
-		return
-	}
-	portStartup := probes.Endpoints[0].InboundPort
-	portReadiness := probes.Endpoints[1].InboundPort
-	portLiveness := probes.Endpoints[2].InboundPort
-	a.Probes = ProbeStruct{
-		StartupProbe: StartupProbe{
-			Type: "HTTP", // TODO: support more scheme
-
-			Port: int(portStartup),
-			Open: true,
-		},
-		ReadinessProbe: ReadinessProbe{
-			Type: "HTTP", // TODO: support more scheme
-			Port: int(portReadiness),
-			Open: true,
-		},
-		LivenessProbe: LivenessProbe{
-			Type: "HTTP", // TODO: support more scheme
-			Port: int(portLiveness),
-			Open: true,
-		},
-	}
+	return false
 }
