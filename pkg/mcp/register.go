@@ -100,7 +100,7 @@ func RegisterTools(server *Server) {
 	})
 
 	server.RegisterTool(&common.ToolDef{
-		Name:        "get_service_detail",
+		Name:        "get_service_distribution",
 		Description: "获取服务详情，包括服务的提供者或消费者应用列表",
 		InputSchema: common.InputSchema{
 			Type: "object",
@@ -121,6 +121,34 @@ func RegisterTools(server *Server) {
 					Type:        "string",
 					Description: "服务端类型: provider, consumer",
 					Enum:        []string{"provider", "consumer"},
+				},
+				"mesh": {
+					Type:        "string",
+					Description: "网格名称，默认使用第一个 discovery 配置的 id",
+				},
+			},
+		},
+		Handler: tools.GetServiceDistribution,
+	})
+
+	server.RegisterTool(&common.ToolDef{
+		Name:        "get_service_detail",
+		Description: "获取服务详情，包括语言和方法列表",
+		InputSchema: common.InputSchema{
+			Type:     "object",
+			Required: []string{"serviceName"},
+			Properties: map[string]common.PropertyDef{
+				"serviceName": {
+					Type:        "string",
+					Description: "服务名称",
+				},
+				"group": {
+					Type:        "string",
+					Description: "服务分组",
+				},
+				"version": {
+					Type:        "string",
+					Description: "服务版本",
 				},
 				"mesh": {
 					Type:        "string",

@@ -120,11 +120,11 @@ func (e *appNameSearchExecutor) execute(ctx consolectx.Context, keyword, mesh st
 func (e *appNameSearchExecutor) buildResult(pagedResult *model.SearchPaginationResult, keyword string, pageSize, pageNumber int) map[string]any {
 	apps := extractGlobalApplications(pagedResult)
 	return map[string]any{
-		"keyword":     keyword,
-		"pageSize":    pageSize,
-		"pageNumber":  pageNumber,
+		"keyword":      keyword,
+		"pageSize":     pageSize,
+		"pageNumber":   pageNumber,
 		"applications": apps,
-		"totalCount":  len(apps),
+		"totalCount":   len(apps),
 	}
 }
 

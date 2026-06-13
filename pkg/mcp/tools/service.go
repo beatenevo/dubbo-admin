@@ -18,6 +18,8 @@
 package tools
 
 import (
+	"fmt"
+
 	consolectx "github.com/apache/dubbo-admin/pkg/console/context"
 	"github.com/apache/dubbo-admin/pkg/console/model"
 	"github.com/apache/dubbo-admin/pkg/console/service"
@@ -46,8 +48,8 @@ func SearchServices(ctx consolectx.Context, args map[string]any) (*common.ToolRe
 	return buildServiceSearchResult(result, keywords, mesh, pageSize, pageNumber)
 }
 
-// GetServiceDetail 获取服务详情
-func GetServiceDetail(ctx consolectx.Context, args map[string]any) (*common.ToolResult, error) {
+// GetServiceDistribution 获取服务关联的应用分布
+func GetServiceDistribution(ctx consolectx.Context, args map[string]any) (*common.ToolResult, error) {
 	helper := common.NewArgsHelper(args)
 	serviceName := helper.GetString("serviceName", "")
 
@@ -156,14 +158,38 @@ func extractServices(result *model.SearchPaginationResult) ([]any, int) {
 
 	resultSlice := make([]any, 0, len(services))
 	for _, svc := range services {
-		if svc != nil {
-			resultSlice = append(resultSlice, map[string]any{
-				"serviceName":     svc.ServiceName,
-				"version":         svc.Version,
-				"group":           svc.Group,
-				"consumerAppName": svc.ConsumerAppName,
-			})
+		if svc == nil {
+			continue
 		}
+		resultSlice = append(resultSlice, map[string]any{
+			"serviceName":     svc.ServiceName,
+			"version":         svc.Version,
+			"group":           svc.Group,
+			"consumerAppName": svc.ConsumerAppName,
+		})
 	}
 	return resultSlice, int(result.PageInfo.Total)
+}
+
+// GetServiceDetail 获取服务详情
+func GetServiceDetail(ctx consolectx.Context, args map[string]any) (*common.ToolResult, error) {
+	helper := common.NewArgsHelper(args)
+	serviceName := helper.GetString("serviceName", "")
+	if serviceName == "" {
+		return common.ErrorResult(fmt.Errorf("required parameter 'serviceName' is missing")), nil
+	}
+
+	req := &model.ServiceDetailReq{
+		ServiceName: serviceName,
+		Version:     helper.GetString("version", ""),
+		Group:       helper.GetString("group", ""),
+		Mesh:        common.GetMeshArg(ctx, args),
+	}
+
+	detail, err := service.GetServiceDetail(ctx, req)
+	if err != nil {
+		return common.ErrorResult(err), nil
+	}
+
+	return common.JsonResult(detail)
 }
