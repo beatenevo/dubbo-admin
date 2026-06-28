@@ -20,6 +20,7 @@ package mcp
 import (
 	"github.com/apache/dubbo-admin/pkg/mcp/common"
 	"github.com/apache/dubbo-admin/pkg/mcp/tools"
+	logtools "github.com/apache/dubbo-admin/pkg/mcp/tools/log"
 )
 
 // RegisterTools 注册所有 MCP 工具
@@ -337,5 +338,36 @@ func RegisterTools(server *Server) {
 			Required: []string{"appName"},
 		},
 		Handler: tools.GetApplicationServices,
+	})
+
+	logSearchProperties := logtools.LogSearchProperties()
+	server.RegisterTool(&common.ToolDef{
+		Name:        "search_logs",
+		Description: "查询 Dubbo 服务日志，支持按应用、服务、实例、TraceID 和关键字过滤",
+		InputSchema: common.InputSchema{
+			Type:       "object",
+			Properties: logSearchProperties,
+		},
+		Handler: logtools.SearchLogs,
+	})
+
+	server.RegisterTool(&common.ToolDef{
+		Name:        "analyze_error_logs",
+		Description: "分析错误日志并按错误模式聚合",
+		InputSchema: common.InputSchema{
+			Type:       "object",
+			Properties: logSearchProperties,
+		},
+		Handler: logtools.AnalyzeErrorLogs,
+	})
+
+	server.RegisterTool(&common.ToolDef{
+		Name:        "get_log_capabilities",
+		Description: "获取日志查询能力，返回 Loki 当前可用 labels 以及查询参数到 labels 的映射",
+		InputSchema: common.InputSchema{
+			Type:       "object",
+			Properties: logtools.LogCapabilitiesProperties(),
+		},
+		Handler: logtools.GetLogCapabilities,
 	})
 }
