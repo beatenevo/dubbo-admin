@@ -120,6 +120,7 @@ func (ra *ReActAgent) newInteraction(input *schema.UserInput, sessionID string) 
 	history.AddHistory(sessionID, ai.NewUserMessage(ai.NewTextPart(input.Content)))
 
 	ctx := context.WithValue(ra.memoryCtx, memory.SessionIDKey, sessionID)
+	ctx = withCurrentPageContext(ctx, input.Context)
 	s := &state{Input: input, Session: sessionID, Usage: &ai.GenerationUsage{}}
 	return ctx, s, history, nil
 }

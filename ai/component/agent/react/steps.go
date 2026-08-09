@@ -79,12 +79,16 @@ func (ra *ReActAgent) reasonActStep(prompt ai.Prompt, chans *agent.Channels, tim
 		if history.IsEmpty(sessionID) {
 			return false, fmt.Errorf("history is empty")
 		}
+		messages, err := injectCurrentPageContext(ctx, history.WindowMemory(sessionID))
+		if err != nil {
+			return false, err
+		}
 
 		// Only the model call is bound by the stage timeout; tool execution below
 		// runs on the original ctx so a slow reasoning step can't starve the tools
 		// it just asked for (which would otherwise fail hard on the shared deadline).
 		lctx, cancel := withTimeout(ctx, timeout)
-		resp, err := prompt.Execute(lctx, ai.WithMessages(history.WindowMemory(sessionID)...))
+		resp, err := prompt.Execute(lctx, ai.WithMessages(messages...))
 		cancel()
 		if err != nil {
 			return false, fmt.Errorf("failed to execute reasonAct prompt: %w", err)
@@ -150,12 +154,16 @@ func (ra *ReActAgent) observeStep(prompt ai.Prompt, chans *agent.Channels, timeo
 		if history.IsEmpty(sessionID) {
 			return false, fmt.Errorf("history is empty")
 		}
+		messages, err := injectCurrentPageContext(ctx, history.WindowMemory(sessionID))
+		if err != nil {
+			return false, err
+		}
 
 		obsCtx, cancel := withTimeout(ctx, timeout)
 		defer cancel()
 
 		var observation *schema.Observation
-		resp, err := prompt.Execute(obsCtx, ai.WithMessages(history.WindowMemory(sessionID)...))
+		resp, err := prompt.Execute(obsCtx, ai.WithMessages(messages...))
 		switch {
 		case err != nil && (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)):
 			runtime.GetLogger().Warn("Observe stage timeout, returning fallback response", "timeout", timeout)
