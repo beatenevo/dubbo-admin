@@ -202,6 +202,53 @@ func TestGormStore_MessageSequenceIsUniquePerTurn(t *testing.T) {
 	}
 }
 
+func TestGormStore_DeleteExpiredDoesNotDeleteRefreshedSession(t *testing.T) {
+	store := newSQLiteStore(t, filepath.Join(t.TempDir(), "expired-race.db"))
+	now := time.Now()
+	session := &conversationstore.Session{
+		ID:        "expired-race-session",
+		CreatedAt: now.Add(-25 * time.Hour),
+		UpdatedAt: now.Add(-25 * time.Hour),
+		Status:    "active",
+	}
+	if err := store.Create(context.Background(), session); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	// Simulate another instance refreshing the row after cleanup has selected it
+	// but before cleanup revalidates it for deletion.
+	refreshed := false
+	if err := store.DB().Callback().Query().After("gorm:after_query").Register(
+		"test:refresh_expired_session",
+		func(tx *gorm.DB) {
+			if refreshed {
+				return
+			}
+			rows, ok := tx.Statement.Dest.(*[]gormstore.SessionModel)
+			if !ok || len(*rows) == 0 {
+				return
+			}
+			refreshed = true
+			if err := tx.Session(&gorm.Session{NewDB: true}).Exec("UPDATE ai_sessions SET updated_at = ? WHERE id = ?", now, session.ID).Error; err != nil {
+				tx.AddError(err)
+			}
+		},
+	); err != nil {
+		t.Fatalf("register refresh callback error = %v", err)
+	}
+
+	deleted, err := store.DeleteExpired(context.Background(), now)
+	if err != nil {
+		t.Fatalf("DeleteExpired() error = %v", err)
+	}
+	if deleted != 0 {
+		t.Fatalf("DeleteExpired() = %d, want 0 for refreshed session", deleted)
+	}
+	if _, err := store.Get(context.Background(), session.ID); err != nil {
+		t.Fatalf("Get() after refreshed cleanup error = %v", err)
+	}
+}
+
 func TestGormStore_NoForeignKeysAndInvalidPayload(t *testing.T) {
 	store := newSQLiteStore(t, filepath.Join(t.TempDir(), "schema.db"))
 	var count int

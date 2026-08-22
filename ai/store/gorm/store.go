@@ -177,17 +177,29 @@ func (s *GormStore) DeleteExpired(ctx context.Context, now time.Time) (int, erro
 		return 0, err
 	}
 	cutoff := now.Add(-sessionExpiration)
-	var sessions []SessionModel
-	tx := s.db.WithContext(normalizeContext(ctx))
-	if err := tx.Where("updated_at < ?", cutoff).Find(&sessions).Error; err != nil {
-		return 0, err
-	}
-	if len(sessions) == 0 {
-		return 0, nil
-	}
 	deleted := 0
-	err := tx.Transaction(func(tx *gorm.DB) error {
+	err := s.db.WithContext(normalizeContext(ctx)).Transaction(func(tx *gorm.DB) error {
+		query := tx.Where("updated_at < ?", cutoff)
+		if supportsRowLock(tx) {
+			query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+		}
+		var sessions []SessionModel
+		if err := query.Find(&sessions).Error; err != nil {
+			return err
+		}
 		for i := range sessions {
+			// Re-read the row after acquiring the transaction lock. This prevents
+			// cleanup from deleting a session refreshed by another instance.
+			current, err := s.findSession(tx, sessions[i].ID, true)
+			if err != nil {
+				if errors.Is(err, conversationstore.ErrSessionNotFound) {
+					continue
+				}
+				return err
+			}
+			if !isExpired(current.UpdatedAt, now) {
+				continue
+			}
 			if err := deleteSessionData(tx, sessions[i].ID); err != nil {
 				return err
 			}
