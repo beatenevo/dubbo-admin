@@ -23,12 +23,16 @@ import (
 
 	"dubbo-admin-ai/component/agent"
 	"dubbo-admin-ai/component/agent/fallback"
-	"dubbo-admin-ai/component/memory"
 	"dubbo-admin-ai/schema"
+	conversationstore "dubbo-admin-ai/store"
 
 	"github.com/firebase/genkit/go/ai"
 	"github.com/firebase/genkit/go/genkit"
 )
+
+type contextKey string
+
+const sessionIDContextKey contextKey = "session"
 
 // ReActAgent is a ReAct-strategy agent: each interaction runs the configured
 // stages (reasonAct then observe) in a bounded loop until the observe stage
@@ -36,9 +40,9 @@ import (
 // is safe for concurrent interactions — per-interaction state lives in the
 // Channels/state returned by Interact, not on the agent.
 type ReActAgent struct {
-	registry  *genkit.Genkit
-	memoryCtx context.Context
-	fallback  *fallback.Handler // single shared fallback handler
+	registry     *genkit.Genkit
+	messageStore conversationstore.MessageStore
+	fallback     *fallback.Handler // single shared fallback handler
 
 	stages       []builtStage
 	toolTimeouts toolTimeoutResolver
@@ -52,12 +56,13 @@ type ReActAgent struct {
 // NewReActAgent builds a ReActAgent, assembling one prompt per configured stage
 // up front so the per-interaction hot path only executes them. It returns an
 // error if any stage's prompt file is missing or a stage is misconfigured.
-func NewReActAgent(g *genkit.Genkit, promptBasePath string, defaultModel string, maxIterations int, stageChannelBufferSize int, stagesCfg []StageInfo, toolTimeouts toolTimeoutResolver, toolRefs []ai.ToolRef) (*ReActAgent, error) {
-	memoryCtx := memory.NewMemoryContext(memory.ChatHistoryKey)
-
+func NewReActAgent(g *genkit.Genkit, messageStore conversationstore.MessageStore, promptBasePath string, defaultModel string, maxIterations int, stageChannelBufferSize int, stagesCfg []StageInfo, toolTimeouts toolTimeoutResolver, toolRefs []ai.ToolRef) (*ReActAgent, error) {
+	if messageStore == nil {
+		return nil, fmt.Errorf("message store is nil")
+	}
 	ra := &ReActAgent{
 		registry:       g,
-		memoryCtx:      memoryCtx,
+		messageStore:   messageStore,
 		fallback:       fallback.NewHandler(),
 		toolTimeouts:   toolTimeouts,
 		defaultModel:   defaultModel,
@@ -77,10 +82,13 @@ func NewReActAgent(g *genkit.Genkit, promptBasePath string, defaultModel string,
 // Interact runs one interaction asynchronously and returns immediately with the
 // Channels the caller streams from. The loop, final answer emission, and channel
 // close all happen on a background goroutine; the caller owns draining Channels.
-func (ra *ReActAgent) Interact(input *schema.UserInput, sessionID string) *agent.Channels {
+func (ra *ReActAgent) Interact(parent context.Context, input *schema.UserInput, sessionID string) *agent.Channels {
 	chans := agent.NewChannels(ra.bufferSize)
 	go func() {
-		ctx, s, history, err := ra.newInteraction(input, sessionID)
+		if parent == nil {
+			parent = context.Background()
+		}
+		ctx, s, err := ra.newInteraction(parent, input, sessionID)
 		if err != nil {
 			chans.ErrorChan <- err
 			chans.Close()
@@ -89,6 +97,14 @@ func (ra *ReActAgent) Interact(input *schema.UserInput, sessionID string) *agent
 
 		if err := runLoop(ctx, s, ra.maxIterations, ra.buildSteps(chans)...); err != nil {
 			chans.ErrorChan <- err
+			chans.Close()
+			return
+		}
+
+		if err := ra.messageStore.NextTurn(ctx, sessionID); err != nil {
+			chans.ErrorChan <- fmt.Errorf("failed to complete turn: %w", err)
+			chans.Close()
+			return
 		}
 
 		// Emit the final answer for the SSE layer; it carries the accumulated
@@ -101,36 +117,29 @@ func (ra *ReActAgent) Interact(input *schema.UserInput, sessionID string) *agent
 		chans.Send(schema.StreamFinal(final))
 
 		chans.Close()
-		history.NextTurn(sessionID)
 	}()
 	return chans
 }
 
 // newInteraction records the user input into history and returns a session-scoped
 // context plus a fresh state.
-func (ra *ReActAgent) newInteraction(input *schema.UserInput, sessionID string) (context.Context, *state, *memory.HistoryMemory, error) {
-	history, err := memory.GetHistoryMemory(ra.memoryCtx, memory.ChatHistoryKey)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to get history from context: %w", err)
+func (ra *ReActAgent) newInteraction(parent context.Context, input *schema.UserInput, sessionID string) (context.Context, *state, error) {
+	if ra.messageStore == nil {
+		return nil, nil, fmt.Errorf("message store is not configured")
+	}
+	if input == nil {
+		return nil, nil, fmt.Errorf("user input is nil")
 	}
 
 	// Record the user's message as plain text. The session id travels via
-	// context (memory.SessionIDKey), so there is no need to wrap the input in a
+	// context, so there is no need to wrap the input in a
 	// JSON envelope the model would otherwise have to read through.
-	history.AddHistory(sessionID, ai.NewUserMessage(ai.NewTextPart(input.Content)))
+	if err := ra.messageStore.AddHistory(parent, sessionID, ai.NewUserMessage(ai.NewTextPart(input.Content))); err != nil {
+		return nil, nil, fmt.Errorf("failed to record user message: %w", err)
+	}
 
-	ctx := context.WithValue(ra.memoryCtx, memory.SessionIDKey, sessionID)
+	ctx := context.WithValue(parent, sessionIDContextKey, sessionID)
 	ctx = withCurrentPageContext(ctx, input.Context)
 	s := &state{Input: input, Session: sessionID, Usage: &ai.GenerationUsage{}}
-	return ctx, s, history, nil
-}
-
-// GetMemory returns the agent's chat history store, or nil if it cannot be
-// resolved from the agent's memory context.
-func (ra *ReActAgent) GetMemory() *memory.HistoryMemory {
-	h, err := memory.GetHistoryMemory(ra.memoryCtx, memory.ChatHistoryKey)
-	if err != nil {
-		return nil
-	}
-	return h
+	return ctx, s, nil
 }

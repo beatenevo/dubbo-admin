@@ -22,9 +22,11 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
-	"dubbo-admin-ai/component/memory"
 	"dubbo-admin-ai/schema"
+	conversationstore "dubbo-admin-ai/store"
+	memorystore "dubbo-admin-ai/store/memory"
 
 	"github.com/firebase/genkit/go/ai"
 )
@@ -73,16 +75,30 @@ func TestNewInteractionCarriesPageContext(t *testing.T) {
 		Page:    schema.AIContextPage{Path: "/home"},
 		Scope:   schema.AIContextScope{Mesh: "nacos2.5"},
 	}
-	ra := &ReActAgent{memoryCtx: memory.NewMemoryContext(memory.ChatHistoryKey)}
+	backingStore := memorystore.NewMemoryStore()
+	now := time.Now()
+	if err := backingStore.Create(context.Background(), &conversationstore.Session{
+		ID:        "session",
+		CreatedAt: now,
+		UpdatedAt: now,
+		Status:    "active",
+	}); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	ra := &ReActAgent{messageStore: backingStore}
 
-	ctx, _, history, err := ra.newInteraction(&schema.UserInput{
+	ctx, _, err := ra.newInteraction(context.Background(), &schema.UserInput{
 		Content: "current question",
 		Context: snapshot,
 	}, "session")
 	if err != nil {
 		t.Fatalf("newInteraction() error = %v", err)
 	}
-	messages, err := injectCurrentPageContext(ctx, history.WindowMemory("session"))
+	history, err := backingStore.WindowMemory(ctx, "session")
+	if err != nil {
+		t.Fatalf("WindowMemory() error = %v", err)
+	}
+	messages, err := injectCurrentPageContext(ctx, history)
 	if err != nil {
 		t.Fatalf("injectCurrentPageContext() error = %v", err)
 	}

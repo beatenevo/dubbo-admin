@@ -1,48 +1,61 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package engine
 
 import (
 	"fmt"
 	"net/http"
 
+	"dubbo-admin-ai/component/agent"
 	"dubbo-admin-ai/component/server/engine/session"
 	"dubbo-admin-ai/component/server/engine/sse"
 	rt "dubbo-admin-ai/runtime"
-
-	"dubbo-admin-ai/component/agent"
 	"dubbo-admin-ai/schema"
 
 	"github.com/gin-gonic/gin"
 )
 
-// AgentHandler handles AI Agent requests
+// AgentHandler handles AI Agent requests.
 type AgentHandler struct {
 	agent      agent.Agent
 	sessionMgr *session.Manager
 }
 
-// NewAgentHandler creates an AI Agent handler
+// NewAgentHandler creates an AI Agent handler.
 func NewAgentHandler(agent agent.Agent, sessionMgr *session.Manager) *AgentHandler {
-	sessionMgr.CreateMockSession()
 	return &AgentHandler{
 		agent:      agent,
 		sessionMgr: sessionMgr,
 	}
 }
 
-// StreamChat handles streaming chat endpoint
+// StreamChat handles streaming chat endpoint.
 func (h *AgentHandler) StreamChat(c *gin.Context) {
 	var (
 		req          ChatRequest
 		pageContext  *schema.AIContextSnapshot
 		sessionID    string
-		session      *session.Session
 		sseHandler   *sse.SSEHandler
 		streamWriter *sse.StreamWriter
 		channels     *agent.Channels
 		err          error
 	)
 
-	// Parse request
 	if err = c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, NewErrorResponse("Invalid request: "+err.Error()))
 		return
@@ -53,13 +66,15 @@ func (h *AgentHandler) StreamChat(c *gin.Context) {
 	}
 
 	sessionID = req.SessionID
-	// Validate session exists and update activity time
-	session, err = h.sessionMgr.GetSession(sessionID)
-	if err != nil {
+	requestCtx := c.Request.Context()
+	if _, err = h.sessionMgr.GetSession(requestCtx, sessionID); err != nil {
 		c.JSON(http.StatusBadRequest, NewErrorResponse("Invalid session ID: "+err.Error()))
 		return
 	}
-	session.UpdateActivity()
+	if err = h.sessionMgr.TouchSession(requestCtx, sessionID); err != nil {
+		c.JSON(http.StatusBadRequest, NewErrorResponse("Invalid session ID: "+err.Error()))
+		return
+	}
 
 	if streamWriter, err = sse.NewStreamWriter(c); err != nil {
 		c.JSON(http.StatusInternalServerError, NewErrorResponse("Failed to create stream writer: "+err.Error()))
@@ -67,14 +82,13 @@ func (h *AgentHandler) StreamChat(c *gin.Context) {
 	}
 	sseHandler = sse.NewStreamHandler(streamWriter, sessionID)
 
-	// Set response headers and error recovery
 	defer func() {
 		if r := recover(); r != nil {
 			sseHandler.HandleError("internal_error", fmt.Sprintf("internal error: %v", r))
 		}
 	}()
 
-	channels = h.agent.Interact(&schema.UserInput{Content: req.Message, Context: pageContext}, sessionID)
+	channels = h.agent.Interact(requestCtx, &schema.UserInput{Content: req.Message, Context: pageContext}, sessionID)
 	var (
 		feedback *schema.StreamFeedback
 		ok       bool
@@ -116,59 +130,58 @@ func (h *AgentHandler) StreamChat(c *gin.Context) {
 				}
 			}
 
-		case <-c.Request.Context().Done():
+		case <-requestCtx.Done():
 			rt.GetLogger().Info("Client disconnected from stream")
 			return
 
 		default:
-			if channels.Closed() {
-				// Drain remaining messages before finishing
-				rt.GetLogger().Info("Channels closed, draining remaining messages", "session_id", sessionID)
-			drainLoop:
-				for {
-					select {
-					case feedback, ok = <-channels.UserRespChan:
-						if !ok {
-							channels.UserRespChan = nil
-							break drainLoop
-						}
-						if feedback.IsFinal() {
-							h.MessageDelta(sseHandler, feedback.Final())
-						} else if feedback.IsDone() {
-							if err := sseHandler.HandleContentBlockStop(feedback.Index()); err != nil {
-								rt.GetLogger().Error("Failed to handle content block stop", "error", err)
-							}
-						} else {
-							if err := sseHandler.HandleText(feedback.Text(), feedback.Index()); err != nil {
-								rt.GetLogger().Error("Failed to handle text", "error", err)
-							}
-						}
-					case err, ok = <-channels.ErrorChan:
-						if !ok {
-							channels.ErrorChan = nil
-							break drainLoop
-						}
-						if err != nil {
-							sseHandler.HandleError("agent_error", fmt.Sprintf("agent error: %v", err))
-						}
-					default:
+			if !channels.Closed() {
+				continue
+			}
+			rt.GetLogger().Info("Channels closed, draining remaining messages", "session_id", sessionID)
+		drainLoop:
+			for {
+				select {
+				case feedback, ok = <-channels.UserRespChan:
+					if !ok {
+						channels.UserRespChan = nil
 						break drainLoop
 					}
+					h.writeFeedback(sseHandler, feedback)
+				case err, ok = <-channels.ErrorChan:
+					if !ok {
+						channels.ErrorChan = nil
+						break drainLoop
+					}
+					if err != nil {
+						sseHandler.HandleError("agent_error", fmt.Sprintf("agent error: %v", err))
+					}
+				default:
+					break drainLoop
 				}
-				if err := sseHandler.FinishStream(); err != nil {
-					rt.GetLogger().Error("Failed to finish stream", "error", err)
-				}
-				rt.GetLogger().Info("Stream processing completed", "session_id", sessionID)
-				return
 			}
+			if err := sseHandler.FinishStream(); err != nil {
+				rt.GetLogger().Error("Failed to finish stream", "error", err)
+			}
+			rt.GetLogger().Info("Stream processing completed", "session_id", sessionID)
+			return
 		}
 	}
 }
 
-// MessageDelta finishes the stream and reports token usage. The observation's
-// Summary/FinalAnswer text was already streamed live by the observe stage
-// (react emitObservation), so this only emits the stop reason + usage — it must
-// NOT re-stream the text, or the client would receive the answer twice.
+func (h *AgentHandler) writeFeedback(sseHandler *sse.SSEHandler, feedback *schema.StreamFeedback) {
+	if feedback.IsFinal() {
+		h.MessageDelta(sseHandler, feedback.Final())
+	} else if feedback.IsDone() {
+		if err := sseHandler.HandleContentBlockStop(feedback.Index()); err != nil {
+			rt.GetLogger().Error("Failed to handle content block stop", "error", err)
+		}
+	} else if err := sseHandler.HandleText(feedback.Text(), feedback.Index()); err != nil {
+		rt.GetLogger().Error("Failed to handle text", "error", err)
+	}
+}
+
+// MessageDelta finishes the stream and reports token usage.
 func (h *AgentHandler) MessageDelta(sseHandler *sse.SSEHandler, output schema.Schema) {
 	stopReason := "end_turn"
 
@@ -178,9 +191,12 @@ func (h *AgentHandler) MessageDelta(sseHandler *sse.SSEHandler, output schema.Sc
 }
 
 func (h *AgentHandler) CreateSession(c *gin.Context) {
-	sessionObj := h.sessionMgr.CreateSession()
-	sessionInfo := sessionObj.ToSessionInfo()
-	c.JSON(http.StatusOK, NewSuccessResponse(sessionInfo))
+	sessionObj, err := h.sessionMgr.CreateSession(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, NewErrorResponse("Failed to create session: "+err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, NewSuccessResponse(toSessionInfo(sessionObj)))
 }
 
 func (h *AgentHandler) GetSession(c *gin.Context) {
@@ -190,28 +206,33 @@ func (h *AgentHandler) GetSession(c *gin.Context) {
 		return
 	}
 
-	sessionObj, err := h.sessionMgr.GetSession(sessionID)
+	sessionObj, err := h.sessionMgr.GetSession(c.Request.Context(), sessionID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, NewErrorResponse("Session not found: "+err.Error()))
 		return
 	}
-
-	sessionInfo := sessionObj.ToSessionInfo()
-	c.JSON(http.StatusOK, NewSuccessResponse(sessionInfo))
+	c.JSON(http.StatusOK, NewSuccessResponse(toSessionInfo(sessionObj)))
 }
 
 func (h *AgentHandler) ListSessions(c *gin.Context) {
-	sessions := h.sessionMgr.ListSessions()
+	sessionObjs, err := h.sessionMgr.ListSessions(c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, NewErrorResponse("Failed to list sessions: "+err.Error()))
+		return
+	}
+	sessions := make([]map[string]any, 0, len(sessionObjs))
+	for _, sessionObj := range sessionObjs {
+		sessions = append(sessions, toSessionInfo(sessionObj))
+	}
 
 	response := map[string]any{
 		"sessions": sessions,
 		"total":    len(sessions),
 	}
-
 	c.JSON(http.StatusOK, NewSuccessResponse(response))
 }
 
-// DeleteSession deletes a session
+// DeleteSession deletes a session and its conversation history.
 func (h *AgentHandler) DeleteSession(c *gin.Context) {
 	sessionID := c.Param("sessionId")
 	if sessionID == "" {
@@ -219,19 +240,21 @@ func (h *AgentHandler) DeleteSession(c *gin.Context) {
 		return
 	}
 
-	err := h.sessionMgr.DeleteSession(sessionID)
-	if err != nil {
+	if err := h.sessionMgr.DeleteSession(c.Request.Context(), sessionID); err != nil {
 		c.JSON(http.StatusNotFound, NewErrorResponse("Session not found: "+err.Error()))
 		return
-	}
-
-	// Delete corresponding history
-	if agentMemory := h.agent.GetMemory(); agentMemory != nil {
-		agentMemory.Clear(sessionID)
-		rt.GetLogger().Info("Session history cleared", "session_id", sessionID)
 	}
 
 	c.JSON(http.StatusOK, NewSuccessResponse(map[string]string{
 		"message": "Session deleted successfully",
 	}))
+}
+
+func toSessionInfo(sessionObj *session.Session) map[string]any {
+	return map[string]any{
+		"session_id": sessionObj.ID,
+		"created_at": sessionObj.CreatedAt,
+		"updated_at": sessionObj.UpdatedAt,
+		"status":     sessionObj.Status,
+	}
 }

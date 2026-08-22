@@ -22,10 +22,12 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"dubbo-admin-ai/component/agent/fallback"
-	"dubbo-admin-ai/component/memory"
 	"dubbo-admin-ai/schema"
+	conversationstore "dubbo-admin-ai/store"
+	memorystore "dubbo-admin-ai/store/memory"
 
 	"github.com/firebase/genkit/go/ai"
 	"github.com/firebase/genkit/go/genkit"
@@ -46,20 +48,25 @@ func (s *stubPrompt) Render(ctx context.Context, input any) (*ai.GenerateActionO
 	return &ai.GenerateActionOptions{}, nil
 }
 
-func contextWithHistory(sessionID string) context.Context {
-	ctx := memory.NewMemoryContext(memory.ChatHistoryKey)
-	history, _ := memory.GetHistoryMemory(ctx, memory.ChatHistoryKey)
-	history.AddHistory(sessionID, ai.NewUserMessage(ai.NewTextPart("hello")))
-	ctx = context.WithValue(ctx, memory.SessionIDKey, sessionID)
-	return ctx
+func contextWithHistory(s conversationstore.Store, sessionID string) context.Context {
+	now := time.Now()
+	if err := s.Create(context.Background(), &conversationstore.Session{
+		ID:        sessionID,
+		CreatedAt: now,
+		UpdatedAt: now,
+		Status:    "active",
+	}); err != nil {
+		panic(err)
+	}
+	if err := s.AddHistory(context.Background(), sessionID, ai.NewUserMessage(ai.NewTextPart("hello"))); err != nil {
+		panic(err)
+	}
+	return context.WithValue(context.Background(), sessionIDContextKey, sessionID)
 }
 
-func testAgent(g *genkit.Genkit) *ReActAgent {
-	return &ReActAgent{
-		registry:  g,
-		memoryCtx: memory.NewMemoryContext(memory.ChatHistoryKey),
-		fallback:  fallback.NewHandler(),
-	}
+func testAgent(g *genkit.Genkit) (*ReActAgent, conversationstore.Store) {
+	s := memorystore.NewMemoryStore()
+	return &ReActAgent{registry: g, messageStore: s, fallback: fallback.NewHandler()}, s
 }
 
 func textResp(text string) *ai.ModelResponse {
@@ -127,10 +134,10 @@ func TestReasonActStep(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			g := genkit.Init(context.Background())
-			ra := testAgent(g)
+			ra, backingStore := testAgent(g)
 			s := &state{Input: &schema.UserInput{Content: "hi"}, Session: "session", Usage: &ai.GenerationUsage{}}
 
-			done, err := ra.reasonActStep(tt.setup(g), nil, 0)(contextWithHistory("session"), s)
+			done, err := ra.reasonActStep(tt.setup(g), nil, 0)(contextWithHistory(backingStore, "session"), s)
 			if tt.errContain != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.errContain) {
 					t.Fatalf("expected error containing %q, got %v", tt.errContain, err)
@@ -150,7 +157,7 @@ func TestReasonActStep(t *testing.T) {
 
 func TestReasonActStepExecuteError(t *testing.T) {
 	g := genkit.Init(context.Background())
-	ra := testAgent(g)
+	ra, backingStore := testAgent(g)
 	prompt := &stubPrompt{resp: nil, err: errors.New("execute failed")}
 	s := &state{Input: &schema.UserInput{Content: "hi"}, Session: "s3", Usage: &ai.GenerationUsage{}}
 
@@ -160,7 +167,7 @@ func TestReasonActStepExecuteError(t *testing.T) {
 		}
 	}()
 
-	_, err := ra.reasonActStep(prompt, nil, 0)(contextWithHistory("s3"), s)
+	_, err := ra.reasonActStep(prompt, nil, 0)(contextWithHistory(backingStore, "s3"), s)
 	if err == nil || !strings.Contains(err.Error(), "failed to execute reasonAct prompt") {
 		t.Fatalf("expected wrapped execute error, got %v", err)
 	}

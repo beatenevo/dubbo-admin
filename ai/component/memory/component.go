@@ -19,19 +19,23 @@ package memory
 
 import (
 	"context"
-	"dubbo-admin-ai/runtime"
 	"fmt"
+
+	"dubbo-admin-ai/runtime"
+	conversationstore "dubbo-admin-ai/store"
+	memorystore "dubbo-admin-ai/store/memory"
 )
 
-// MemoryComponent implements the memory component
-// TODO(memory, 2026-02-24): Inject unified memory interface to support different memory implementations
-// Current implementation uses HistoryMemory directly
+// MemoryComponent owns the single conversation Store shared by runtime
+// consumers. The legacy HistoryMemory accessors remain for compatibility with
+// existing component tests; production Agent and Tool code uses GetStore.
 type MemoryComponent struct {
 	instanceName string
 	historyKey   HistoryKey
 	maxTurns     int
 	memoryCtx    context.Context
 	memory       *HistoryMemory
+	store        conversationstore.Store
 }
 
 func NewMemoryComponent(historyKey HistoryKey, maxTurns ...int) (runtime.Component, error) {
@@ -64,6 +68,7 @@ func (m *MemoryComponent) Validate() error {
 }
 
 func (m *MemoryComponent) Init(rt *runtime.Runtime) error {
+	m.store = memorystore.NewMemoryStore()
 	m.memoryCtx = NewMemoryContext(m.historyKey)
 	history, err := GetHistoryMemory(m.memoryCtx, m.historyKey)
 	if err != nil {
@@ -90,8 +95,15 @@ func (m *MemoryComponent) GetContext() context.Context {
 	return m.memoryCtx
 }
 
-// TODO(memory, 2026-02-24): Provide unified interface for different memory types (HistoryMemory, VectorMemory, etc.)
-// GetMemory returns the underlying HistoryMemory instance
+// GetStore returns the single conversation Store shared by runtime consumers.
+func (m *MemoryComponent) GetStore() (conversationstore.Store, error) {
+	if m.store == nil {
+		return nil, fmt.Errorf("store not initialized")
+	}
+	return m.store, nil
+}
+
+// GetMemory returns the legacy HistoryMemory instance for compatibility.
 func (m *MemoryComponent) GetMemory() (*HistoryMemory, error) {
 	if m.memory == nil {
 		return nil, fmt.Errorf("history not initialized")

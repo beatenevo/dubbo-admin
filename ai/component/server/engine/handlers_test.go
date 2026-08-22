@@ -19,15 +19,18 @@ package engine
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"dubbo-admin-ai/component/agent"
-	"dubbo-admin-ai/component/memory"
 	"dubbo-admin-ai/component/server/engine/session"
 	"dubbo-admin-ai/schema"
+	conversationstore "dubbo-admin-ai/store"
+	memorystore "dubbo-admin-ai/store/memory"
 
 	"github.com/gin-gonic/gin"
 )
@@ -36,15 +39,11 @@ type captureAgent struct {
 	input *schema.UserInput
 }
 
-func (a *captureAgent) Interact(input *schema.UserInput, _ string) *agent.Channels {
+func (a *captureAgent) Interact(_ context.Context, input *schema.UserInput, _ string) *agent.Channels {
 	a.input = input
 	channels := agent.NewChannels(1)
 	channels.Close()
 	return channels
-}
-
-func (a *captureAgent) GetMemory() *memory.HistoryMemory {
-	return nil
 }
 
 func TestStreamChatContextContract(t *testing.T) {
@@ -60,7 +59,18 @@ func TestStreamChatContextContract(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			capturedAgent := &captureAgent{}
-			sessionManager := session.NewManager()
+			backingStore := memorystore.NewMemoryStore()
+			now := time.Now()
+			if err := backingStore.Create(context.Background(), &conversationstore.Session{
+				ID:        "session_test",
+				CreatedAt: now,
+				UpdatedAt: now,
+				Status:    "active",
+			}); err != nil {
+				t.Fatalf("Create() error = %v", err)
+			}
+			sessionManager := session.NewManager(backingStore)
+			defer sessionManager.Close()
 			handler := NewAgentHandler(capturedAgent, sessionManager)
 			router := gin.New()
 			router.POST("/api/v1/ai/chat/stream", handler.StreamChat)

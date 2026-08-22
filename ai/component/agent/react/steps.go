@@ -26,7 +26,6 @@ import (
 	"time"
 
 	"dubbo-admin-ai/component/agent"
-	"dubbo-admin-ai/component/memory"
 	toolEngine "dubbo-admin-ai/component/tools/engine"
 	"dubbo-admin-ai/runtime"
 	"dubbo-admin-ai/schema"
@@ -49,18 +48,14 @@ func (ra *ReActAgent) buildSteps(chans *agent.Channels) []step {
 	return steps
 }
 
-// historyFromCtx pulls the session-scoped history out of ctx, replacing the
-// pointer/value assertion churn the old flows repeated at every stage.
-func historyFromCtx(ctx context.Context) (*memory.HistoryMemory, string, error) {
-	history, ok := ctx.Value(memory.ChatHistoryKey).(*memory.HistoryMemory)
-	if !ok {
-		return nil, "", fmt.Errorf("failed to get history from context")
-	}
-	sessionID, ok := ctx.Value(memory.SessionIDKey).(string)
+// sessionIDFromCtx pulls only the session identity out of ctx. Conversation
+// data is owned by the injected MessageStore rather than context values.
+func sessionIDFromCtx(ctx context.Context) (string, error) {
+	sessionID, ok := ctx.Value(sessionIDContextKey).(string)
 	if !ok || sessionID == "" {
-		return nil, "", fmt.Errorf("session id not found in context")
+		return "", fmt.Errorf("session id not found in context")
 	}
-	return history, sessionID, nil
+	return sessionID, nil
 }
 
 // reasonActStep merges the old think + act stages: one model call reasons about
@@ -72,14 +67,22 @@ func (ra *ReActAgent) reasonActStep(prompt ai.Prompt, chans *agent.Channels, tim
 		emitStageProgress(chans, flowReasonAct, true)
 		defer emitStageProgress(chans, flowReasonAct, false)
 
-		history, sessionID, err := historyFromCtx(ctx)
+		sessionID, err := sessionIDFromCtx(ctx)
 		if err != nil {
 			return false, err
 		}
-		if history.IsEmpty(sessionID) {
+		empty, err := ra.messageStore.IsEmpty(ctx, sessionID)
+		if err != nil {
+			return false, fmt.Errorf("failed to inspect history: %w", err)
+		}
+		if empty {
 			return false, fmt.Errorf("history is empty")
 		}
-		messages, err := injectCurrentPageContext(ctx, history.WindowMemory(sessionID))
+		history, err := ra.messageStore.WindowMemory(ctx, sessionID)
+		if err != nil {
+			return false, fmt.Errorf("failed to load history: %w", err)
+		}
+		messages, err := injectCurrentPageContext(ctx, history)
 		if err != nil {
 			return false, err
 		}
@@ -102,7 +105,9 @@ func (ra *ReActAgent) reasonActStep(prompt ai.Prompt, chans *agent.Channels, tim
 		// the observe stage can build on it, and leave tool outputs empty.
 		if len(toolReqs) == 0 {
 			if text := resp.Text(); text != "" {
-				history.AddHistory(sessionID, ai.NewMessage(ai.RoleModel, nil, ai.NewTextPart(text)))
+				if err := ra.messageStore.AddHistory(ctx, sessionID, ai.NewMessage(ai.RoleModel, nil, ai.NewTextPart(text))); err != nil {
+					return false, fmt.Errorf("failed to record model message: %w", err)
+				}
 			}
 			s.Tools = &schema.ToolOutputs{UsageInfo: &ai.GenerationUsage{}}
 			return false, nil
@@ -136,7 +141,9 @@ func (ra *ReActAgent) reasonActStep(prompt ai.Prompt, chans *agent.Channels, tim
 		}
 		runtime.GetLogger().Info("act out:", "out", actOuts)
 		// ai.RoleTool's messages will be ignored by ai.WithMessages
-		history.AddHistory(sessionID, ai.NewMessage(ai.RoleModel, nil, parts...))
+		if err := ra.messageStore.AddHistory(ctx, sessionID, ai.NewMessage(ai.RoleModel, nil, parts...)); err != nil {
+			return false, fmt.Errorf("failed to record model message: %w", err)
+		}
 		s.Tools = actOuts
 		return false, nil
 	}
@@ -147,14 +154,22 @@ func (ra *ReActAgent) observeStep(prompt ai.Prompt, chans *agent.Channels, timeo
 		emitStageProgress(chans, flowObserve, true)
 		defer emitStageProgress(chans, flowObserve, false)
 
-		history, sessionID, err := historyFromCtx(ctx)
+		sessionID, err := sessionIDFromCtx(ctx)
 		if err != nil {
 			return false, err
 		}
-		if history.IsEmpty(sessionID) {
+		empty, err := ra.messageStore.IsEmpty(ctx, sessionID)
+		if err != nil {
+			return false, fmt.Errorf("failed to inspect history: %w", err)
+		}
+		if empty {
 			return false, fmt.Errorf("history is empty")
 		}
-		messages, err := injectCurrentPageContext(ctx, history.WindowMemory(sessionID))
+		history, err := ra.messageStore.WindowMemory(ctx, sessionID)
+		if err != nil {
+			return false, fmt.Errorf("failed to load history: %w", err)
+		}
+		messages, err := injectCurrentPageContext(ctx, history)
 		if err != nil {
 			return false, err
 		}
@@ -184,7 +199,9 @@ func (ra *ReActAgent) observeStep(prompt ai.Prompt, chans *agent.Channels, timeo
 		}
 		runtime.GetLogger().Info("Observe out:", "out", observation)
 
-		history.AddHistory(sessionID, ra.fallback.MarshalObservation(observation))
+		if err := ra.messageStore.AddHistory(ctx, sessionID, ra.fallback.MarshalObservation(observation)); err != nil {
+			return false, fmt.Errorf("failed to record observation: %w", err)
+		}
 		observation.UsageInfo = s.Usage
 		s.Observe = observation
 
