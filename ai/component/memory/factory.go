@@ -18,8 +18,9 @@
 package memory
 
 import (
-	"dubbo-admin-ai/runtime"
 	"fmt"
+
+	"dubbo-admin-ai/runtime"
 
 	"gopkg.in/yaml.v3"
 )
@@ -30,5 +31,17 @@ func MemoryFactory(spec *yaml.Node) (runtime.Component, error) {
 	if err := spec.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("failed to decode memory spec: %w", err)
 	}
-	return NewMemoryComponent(cfg.HistoryKey, cfg.MaxTurns)
+	if cfg.Backend == "" {
+		cfg.Backend = DefaultBackend
+	}
+	if cfg.HistoryKey == "" {
+		cfg.HistoryKey = ChatHistoryKey
+	}
+	if cfg.MaxTurns == 0 {
+		cfg.MaxTurns = DefaultMemorySpec().MaxTurns
+	}
+	if cfg.Database != nil {
+		cfg.Database.applyDefaults()
+	}
+	return NewMemoryComponentFromSpec(cfg)
 }

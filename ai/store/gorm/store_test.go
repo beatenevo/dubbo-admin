@@ -19,6 +19,7 @@ package gormstore_test
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -110,6 +111,94 @@ func TestGormStore_MultiInstanceSharedDataAndDelete(t *testing.T) {
 	}
 	if messages, err := first.AllMemory(ctx, session.ID); err != nil || len(messages) != 0 {
 		t.Fatalf("first AllMemory() after shared delete = %#v, %v", messages, err)
+	}
+}
+
+func TestGormStore_AddHistoryRollsBackWhenMessageWriteFails(t *testing.T) {
+	store := newSQLiteStore(t, filepath.Join(t.TempDir(), "rollback.db"))
+	ctx := context.Background()
+	session := &conversationstore.Session{
+		ID:        "rollback-session",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+		Status:    "active",
+	}
+	if err := store.Create(ctx, session); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	// Fail after the Message INSERT callback has run. AddHistory must roll back
+	// both that write and the Turn created earlier in the same transaction.
+	if err := store.DB().Callback().Create().After("gorm:create").Register(
+		"test:fail_message_create",
+		func(tx *gorm.DB) {
+			if tx.Statement.Table == "ai_messages" {
+				tx.AddError(errors.New("injected message write failure"))
+			}
+		},
+	); err != nil {
+		t.Fatalf("register failure callback error = %v", err)
+	}
+
+	if err := store.AddHistory(ctx, session.ID, ai.NewUserTextMessage("should rollback")); err == nil {
+		t.Fatal("AddHistory() succeeded, want injected write failure")
+	}
+
+	var turnCount int64
+	if err := store.DB().Model(&gormstore.TurnModel{}).
+		Where("session_id = ?", session.ID).Count(&turnCount).Error; err != nil {
+		t.Fatalf("count turns error = %v", err)
+	}
+	if turnCount != 0 {
+		t.Fatalf("turn count after rollback = %d, want 0", turnCount)
+	}
+
+	var messageCount int64
+	if err := store.DB().Model(&gormstore.MessageModel{}).Count(&messageCount).Error; err != nil {
+		t.Fatalf("count messages error = %v", err)
+	}
+	if messageCount != 0 {
+		t.Fatalf("message count after rollback = %d, want 0", messageCount)
+	}
+}
+
+func TestGormStore_MessageSequenceIsUniquePerTurn(t *testing.T) {
+	store := newSQLiteStore(t, filepath.Join(t.TempDir(), "sequence.db"))
+	ctx := context.Background()
+	session := &conversationstore.Session{
+		ID:        "sequence-session",
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+		Status:    "active",
+	}
+	if err := store.Create(ctx, session); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if err := store.AddHistory(ctx, session.ID, ai.NewUserTextMessage("first")); err != nil {
+		t.Fatalf("AddHistory() error = %v", err)
+	}
+
+	var turn gormstore.TurnModel
+	if err := store.DB().Where("session_id = ?", session.ID).First(&turn).Error; err != nil {
+		t.Fatalf("find turn error = %v", err)
+	}
+	duplicate := &gormstore.MessageModel{
+		TurnID:    turn.ID,
+		Sequence:  0,
+		Payload:   []byte(`{"role":"user","content":[{"text":"duplicate"}]}`),
+		CreatedAt: time.Now(),
+	}
+	if err := store.DB().Create(duplicate).Error; err == nil {
+		t.Fatal("duplicate (turn_id, sequence) insert succeeded, want unique constraint error")
+	}
+
+	var count int64
+	if err := store.DB().Model(&gormstore.MessageModel{}).
+		Where("turn_id = ?", turn.ID).Count(&count).Error; err != nil {
+		t.Fatalf("count messages error = %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("message count after duplicate insert = %d, want 1", count)
 	}
 }
 
