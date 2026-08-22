@@ -357,6 +357,9 @@ func (m *MemoryStore) validateSessionLocked(sessionID string) error {
 	if !exists {
 		return conversationstore.ErrSessionNotFound
 	}
+	if session.Status != "active" {
+		return fmt.Errorf("session %q is not active", sessionID)
+	}
 	if isExpired(session.UpdatedAt, time.Now()) {
 		return conversationstore.ErrSessionExpired
 	}

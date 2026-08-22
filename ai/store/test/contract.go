@@ -20,6 +20,8 @@ package storetest
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -115,6 +117,127 @@ func RunStoreContractTests(t *testing.T, newStore func() conversationstore.Store
 		}
 		if len(stored) != 1 || stored[0].Content[0].Text != "original" {
 			t.Fatalf("stored message = %#v, want original snapshot", stored)
+		}
+	})
+
+	t.Run("empty and unsupported history still creates an active turn", func(t *testing.T) {
+		ctx := context.Background()
+		s := newStore()
+		now := time.Now()
+		session := &conversationstore.Session{ID: "empty-turn-session", CreatedAt: now, UpdatedAt: now, Status: "active"}
+		if err := s.Create(ctx, session); err != nil {
+			t.Fatalf("Create() error = %v", err)
+		}
+		if err := s.AddHistory(ctx, session.ID, nil, ai.NewMessage(ai.RoleTool, nil, ai.NewTextPart("ignored"))); err != nil {
+			t.Fatalf("AddHistory() error = %v", err)
+		}
+		empty, err := s.IsEmpty(ctx, session.ID)
+		if err != nil {
+			t.Fatalf("IsEmpty() error = %v", err)
+		}
+		if empty {
+			t.Fatal("IsEmpty() = true after an empty AddHistory(), want false")
+		}
+		messages, err := s.WindowMemory(ctx, session.ID)
+		if err != nil {
+			t.Fatalf("WindowMemory() error = %v", err)
+		}
+		if len(messages) != 0 {
+			t.Fatalf("WindowMemory() = %#v, want empty", messages)
+		}
+		if err := s.NextTurn(ctx, session.ID); err != nil {
+			t.Fatalf("NextTurn() on empty active turn error = %v", err)
+		}
+		if err := s.NextTurn(ctx, session.ID); !errors.Is(err, conversationstore.ErrNoActiveTurn) {
+			t.Fatalf("NextTurn() without active turn = %v, want ErrNoActiveTurn", err)
+		}
+	})
+
+	t.Run("closed session rejects history writes", func(t *testing.T) {
+		ctx := context.Background()
+		s := newStore()
+		now := time.Now()
+		session := &conversationstore.Session{ID: "closed-session", CreatedAt: now, UpdatedAt: now, Status: "closed"}
+		if err := s.Create(ctx, session); err != nil {
+			t.Fatalf("Create() error = %v", err)
+		}
+		if err := s.AddHistory(ctx, session.ID, ai.NewUserTextMessage("rejected")); err == nil || !strings.Contains(err.Error(), "not active") {
+			t.Fatalf("AddHistory() error = %v, want inactive-session error", err)
+		}
+		if err := s.NextTurn(ctx, session.ID); err == nil || !strings.Contains(err.Error(), "not active") {
+			t.Fatalf("NextTurn() error = %v, want inactive-session error", err)
+		}
+	})
+
+	t.Run("expiration is consistent across session operations", func(t *testing.T) {
+		ctx := context.Background()
+		s := newStore()
+		now := time.Now()
+		expired := &conversationstore.Session{
+			ID:        "expired-contract-session",
+			CreatedAt: now.Add(-25 * time.Hour),
+			UpdatedAt: now.Add(-25 * time.Hour),
+			Status:    "active",
+		}
+		active := &conversationstore.Session{ID: "active-contract-session", CreatedAt: now, UpdatedAt: now, Status: "active"}
+		for _, session := range []*conversationstore.Session{expired, active} {
+			if err := s.Create(ctx, session); err != nil {
+				t.Fatalf("Create(%s) error = %v", session.ID, err)
+			}
+		}
+		if _, err := s.Get(ctx, expired.ID); !errors.Is(err, conversationstore.ErrSessionExpired) {
+			t.Fatalf("Get(expired) error = %v, want ErrSessionExpired", err)
+		}
+		if err := s.Touch(ctx, expired.ID, now); !errors.Is(err, conversationstore.ErrSessionExpired) {
+			t.Fatalf("Touch(expired) error = %v, want ErrSessionExpired", err)
+		}
+		listed, err := s.List(ctx)
+		if err != nil {
+			t.Fatalf("List() error = %v", err)
+		}
+		if len(listed) != 1 || listed[0].ID != active.ID {
+			t.Fatalf("List() = %#v, want only active session", listed)
+		}
+		deleted, err := s.DeleteExpired(ctx, now)
+		if err != nil {
+			t.Fatalf("DeleteExpired() error = %v", err)
+		}
+		if deleted != 1 {
+			t.Fatalf("DeleteExpired() = %d, want 1", deleted)
+		}
+		if _, err := s.Get(ctx, expired.ID); !errors.Is(err, conversationstore.ErrSessionNotFound) {
+			t.Fatalf("Get(expired) after DeleteExpired error = %v, want ErrSessionNotFound", err)
+		}
+	})
+
+	t.Run("turn limit and failed transition preserve active turn", func(t *testing.T) {
+		ctx := context.Background()
+		s := newStore()
+		now := time.Now()
+		session := &conversationstore.Session{ID: "limit-session", CreatedAt: now, UpdatedAt: now, Status: "active"}
+		if err := s.Create(ctx, session); err != nil {
+			t.Fatalf("Create() error = %v", err)
+		}
+		if err := s.AddHistory(ctx, session.ID, ai.NewUserTextMessage("turn-0")); err != nil {
+			t.Fatalf("initial AddHistory() error = %v", err)
+		}
+		for i := 1; i < 10; i++ {
+			if err := s.NextTurn(ctx, session.ID); err != nil {
+				t.Fatalf("NextTurn() at turn %d error = %v", i-1, err)
+			}
+			if err := s.AddHistory(ctx, session.ID, ai.NewUserTextMessage(fmt.Sprintf("turn-%d", i))); err != nil {
+				t.Fatalf("AddHistory() at turn %d error = %v", i, err)
+			}
+		}
+		if err := s.NextTurn(ctx, session.ID); !errors.Is(err, conversationstore.ErrTurnLimitReached) {
+			t.Fatalf("full NextTurn() error = %v, want ErrTurnLimitReached", err)
+		}
+		messages, err := s.WindowMemory(ctx, session.ID)
+		if err != nil {
+			t.Fatalf("WindowMemory() after failed NextTurn error = %v", err)
+		}
+		if len(messages) != 1 || messages[0].Text() != "turn-9" {
+			t.Fatalf("active turn after failed NextTurn = %#v, want turn-9", messages)
 		}
 	})
 }
