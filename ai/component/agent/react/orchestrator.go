@@ -33,12 +33,23 @@ type state struct {
 	Input   *schema.UserInput
 	Session string
 
+	// persistCtx is detached from the request cancellation so generated
+	// messages and turn finalization can finish after a client disconnects.
+	persistCtx context.Context
+
 	Tools   *schema.ToolOutputs // reasonAct step writes
 	Observe *schema.Observation // observe step writes
 
 	// Usage is the running token accounting for the whole interaction; each
 	// step accumulates its model call into it. The final observation reports it.
 	Usage *ai.GenerationUsage
+}
+
+func (s *state) persistenceContext(fallback context.Context) context.Context {
+	if s != nil && s.persistCtx != nil {
+		return s.persistCtx
+	}
+	return fallback
 }
 
 // addUsage folds one or more model-call usages into the interaction total,

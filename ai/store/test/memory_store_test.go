@@ -33,8 +33,8 @@ import (
 
 func TestMemoryStore_Contract(t *testing.T) {
 	RunStoreContractTests(t, func() conversationstore.Store {
-		return memorystore.NewMemoryStore()
-	})
+		return memorystore.NewMemoryStore(3)
+	}, 3)
 }
 
 func newTestSession(id string, updatedAt time.Time) *conversationstore.Session {
@@ -242,16 +242,20 @@ func TestMemoryStore_TurnLimitAndNoActiveTurn(t *testing.T) {
 	if err := s.AddHistory(ctx, "session-1", ai.NewUserMessage(ai.NewTextPart("three"))); err != nil {
 		t.Fatalf("third AddHistory() error = %v", err)
 	}
-	if err := s.NextTurn(ctx, "session-1"); !errors.Is(err, conversationstore.ErrTurnLimitReached) {
-		t.Fatalf("full NextTurn() = %v, want ErrTurnLimitReached", err)
+	if err := s.NextTurn(ctx, "session-1"); err != nil {
+		t.Fatalf("final NextTurn() = %v, want success", err)
+	}
+
+	if err := s.AddHistory(ctx, "session-1", ai.NewUserMessage(ai.NewTextPart("overflow"))); !errors.Is(err, conversationstore.ErrTurnLimitReached) {
+		t.Fatalf("overflow AddHistory() = %v, want ErrTurnLimitReached", err)
 	}
 
 	window, err := s.WindowMemory(ctx, "session-1")
 	if err != nil {
-		t.Fatalf("WindowMemory() after failed NextTurn error = %v", err)
+		t.Fatalf("WindowMemory() after rejected turn error = %v", err)
 	}
-	if len(window) != 1 || window[0].Content[0].Text != "three" {
-		t.Fatalf("active turn changed after failed NextTurn: %#v", window)
+	if len(window) != 0 {
+		t.Fatalf("active turn after rejected AddHistory = %#v, want empty", window)
 	}
 }
 

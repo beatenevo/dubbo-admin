@@ -30,8 +30,8 @@ import (
 	"github.com/firebase/genkit/go/ai"
 )
 
-// DefaultTurnLimit preserves the current HistoryMemory window capacity.
-const DefaultTurnLimit = 10
+// DefaultMaxTurns matches MemorySpec's default conversation limit.
+const DefaultMaxTurns = 100
 
 const sessionExpiration = 24 * time.Hour
 
@@ -113,10 +113,10 @@ type MemoryStore struct {
 
 var _ conversationstore.Store = (*MemoryStore)(nil)
 
-// NewMemoryStore creates a MemoryStore. The optional limit exists for tests;
-// the default preserves the current HistoryMemory TurnLimit behavior.
+// NewMemoryStore creates a MemoryStore. The optional limit exists for runtime
+// configuration and tests; the default matches MemorySpec.
 func NewMemoryStore(limits ...int) *MemoryStore {
-	limit := DefaultTurnLimit
+	limit := DefaultMaxTurns
 	if len(limits) > 0 && limits[0] > 0 {
 		limit = limits[0]
 	}
@@ -262,6 +262,9 @@ func (m *MemoryStore) AddHistory(ctx context.Context, sessionID string, messages
 
 	history := m.ensureHistoryLocked(sessionID)
 	if history.window.empty() {
+		if len(history.history) >= m.limit {
+			return fmt.Errorf("%w: current session's context is full, please create a new session", conversationstore.ErrTurnLimitReached)
+		}
 		history.nextID++
 		if !history.window.push(&turn{id: history.nextID, createdAt: time.Now()}) {
 			return fmt.Errorf("failed to create active turn: %w", conversationstore.ErrTurnLimitReached)
@@ -344,7 +347,7 @@ func (m *MemoryStore) NextTurn(ctx context.Context, sessionID string) error {
 	if history == nil || history.window == nil || history.window.empty() {
 		return conversationstore.ErrNoActiveTurn
 	}
-	if history.window.full() {
+	if len(history.history) >= m.limit {
 		return fmt.Errorf("%w: current session's context is full, please create a new session", conversationstore.ErrTurnLimitReached)
 	}
 	completed := history.window.pop()

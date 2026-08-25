@@ -52,8 +52,8 @@ func newSQLiteStore(t *testing.T, path string, limits ...int) *gormstore.GormSto
 
 func TestGormStore_Contract(t *testing.T) {
 	storetest.RunStoreContractTests(t, func() conversationstore.Store {
-		return newSQLiteStore(t, filepath.Join(t.TempDir(), "contract.db"))
-	})
+		return newSQLiteStore(t, filepath.Join(t.TempDir(), "contract.db"), 3)
+	}, 3)
 }
 
 func TestGormStore_RestartRecovery(t *testing.T) {

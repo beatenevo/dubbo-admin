@@ -105,7 +105,7 @@ func (ra *ReActAgent) reasonActStep(prompt ai.Prompt, chans *agent.Channels, tim
 		// the observe stage can build on it, and leave tool outputs empty.
 		if len(toolReqs) == 0 {
 			if text := resp.Text(); text != "" {
-				if err := ra.messageStore.AddHistory(ctx, sessionID, ai.NewMessage(ai.RoleModel, nil, ai.NewTextPart(text))); err != nil {
+				if err := ra.messageStore.AddHistory(s.persistenceContext(ctx), sessionID, ai.NewMessage(ai.RoleModel, nil, ai.NewTextPart(text))); err != nil {
 					return false, fmt.Errorf("failed to record model message: %w", err)
 				}
 			}
@@ -141,7 +141,7 @@ func (ra *ReActAgent) reasonActStep(prompt ai.Prompt, chans *agent.Channels, tim
 		}
 		runtime.GetLogger().Info("act out:", "out", actOuts)
 		// ai.RoleTool's messages will be ignored by ai.WithMessages
-		if err := ra.messageStore.AddHistory(ctx, sessionID, ai.NewMessage(ai.RoleModel, nil, parts...)); err != nil {
+		if err := ra.messageStore.AddHistory(s.persistenceContext(ctx), sessionID, ai.NewMessage(ai.RoleModel, nil, parts...)); err != nil {
 			return false, fmt.Errorf("failed to record model message: %w", err)
 		}
 		s.Tools = actOuts
@@ -199,7 +199,7 @@ func (ra *ReActAgent) observeStep(prompt ai.Prompt, chans *agent.Channels, timeo
 		}
 		runtime.GetLogger().Info("Observe out:", "out", observation)
 
-		if err := ra.messageStore.AddHistory(ctx, sessionID, ra.fallback.MarshalObservation(observation)); err != nil {
+		if err := ra.messageStore.AddHistory(s.persistenceContext(ctx), sessionID, ra.fallback.MarshalObservation(observation)); err != nil {
 			return false, fmt.Errorf("failed to record observation: %w", err)
 		}
 		observation.UsageInfo = s.Usage

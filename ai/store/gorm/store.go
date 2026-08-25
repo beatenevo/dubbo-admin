@@ -33,8 +33,8 @@ import (
 
 const sessionExpiration = 24 * time.Hour
 
-// DefaultTurnLimit matches the in-memory store's bounded turn window.
-const DefaultTurnLimit = 10
+// DefaultMaxTurns matches MemorySpec's default conversation limit.
+const DefaultMaxTurns = 100
 
 // GormStore persists sessions, turns, and messages in a relational database.
 // It deliberately does not use database foreign keys: relationship checks and
@@ -47,7 +47,8 @@ type GormStore struct {
 var _ conversationstore.Store = (*GormStore)(nil)
 
 // NewGormStore creates a store around an already opened Gorm database. The
-// optional limit exists for tests and preserves the memory backend default.
+// optional limit exists for runtime configuration and tests; the default
+// matches MemorySpec.
 func NewGormStore(db *gorm.DB, limits ...int) (*GormStore, error) {
 	if db == nil {
 		return nil, fmt.Errorf("gorm database is nil")
@@ -59,7 +60,7 @@ func NewGormStore(db *gorm.DB, limits ...int) (*GormStore, error) {
 		db.Config = &gorm.Config{}
 	}
 	db.Config.DisableForeignKeyConstraintWhenMigrating = true
-	limit := DefaultTurnLimit
+	limit := DefaultMaxTurns
 	if len(limits) > 0 && limits[0] > 0 {
 		limit = limits[0]
 	}
@@ -233,6 +234,15 @@ func (s *GormStore) AddHistory(ctx context.Context, sessionID string, messages .
 		err = tx.Where("session_id = ? AND completed_at IS NULL", sessionID).
 			Order("id DESC").First(&turn).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			var completedCount int64
+			if err := tx.Model(&TurnModel{}).
+				Where("session_id = ? AND completed_at IS NOT NULL", sessionID).
+				Count(&completedCount).Error; err != nil {
+				return err
+			}
+			if completedCount >= int64(s.limit) {
+				return fmt.Errorf("%w: current session's context is full, please create a new session", conversationstore.ErrTurnLimitReached)
+			}
 			turn = TurnModel{SessionID: sessionID, CreatedAt: time.Now()}
 			if err := tx.Create(&turn).Error; err != nil {
 				return err
@@ -361,11 +371,13 @@ func (s *GormStore) NextTurn(ctx context.Context, sessionID string) error {
 		} else if err != nil {
 			return err
 		}
-		var count int64
-		if err := tx.Model(&TurnModel{}).Where("session_id = ?", sessionID).Count(&count).Error; err != nil {
+		var completedCount int64
+		if err := tx.Model(&TurnModel{}).
+			Where("session_id = ? AND completed_at IS NOT NULL", sessionID).
+			Count(&completedCount).Error; err != nil {
 			return err
 		}
-		if count >= int64(s.limit) {
+		if completedCount >= int64(s.limit) {
 			return fmt.Errorf("%w: current session's context is full, please create a new session", conversationstore.ErrTurnLimitReached)
 		}
 		completedAt := time.Now()

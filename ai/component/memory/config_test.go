@@ -19,12 +19,18 @@ package memory
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"dubbo-admin-ai/runtime"
+	conversationstore "dubbo-admin-ai/store"
 	gormstore "dubbo-admin-ai/store/gorm"
+	memorystore "dubbo-admin-ai/store/memory"
+
+	"github.com/firebase/genkit/go/ai"
 )
 
 func TestMemorySpecValidate(t *testing.T) {
@@ -88,6 +94,7 @@ func TestMemoryComponent_GormBackendLifecycle(t *testing.T) {
 	if !ok {
 		t.Fatalf("store type = %T, want *gormstore.GormStore", store)
 	}
+	assertConfiguredTurnLimit(t, store, 1)
 	sqlDB, err := gormBackend.DB().DB()
 	if err != nil {
 		t.Fatalf("DB() error = %v", err)
@@ -100,5 +107,76 @@ func TestMemoryComponent_GormBackendLifecycle(t *testing.T) {
 	}
 	if err := sqlDB.PingContext(context.Background()); err == nil {
 		t.Fatal("PingContext() after Stop() succeeded, want closed database")
+	}
+}
+
+func TestMemoryComponent_PassesMaxTurnsToMemoryStore(t *testing.T) {
+	component, err := NewMemoryComponentFromSpec(MemorySpec{
+		Backend:  "memory",
+		MaxTurns: 2,
+	})
+	if err != nil {
+		t.Fatalf("NewMemoryComponentFromSpec() error = %v", err)
+	}
+	if err := component.Init(runtime.NewRuntime()); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	t.Cleanup(func() { _ = component.Stop() })
+
+	store, err := component.(*MemoryComponent).GetStore()
+	if err != nil {
+		t.Fatalf("GetStore() error = %v", err)
+	}
+	if _, ok := store.(*memorystore.MemoryStore); !ok {
+		t.Fatalf("store type = %T, want *memorystore.MemoryStore", store)
+	}
+	assertConfiguredTurnLimit(t, store, 2)
+}
+
+func TestMemoryComponentLazilyInitializesLegacyHistory(t *testing.T) {
+	component, err := NewMemoryComponentFromSpec(MemorySpec{
+		Backend:  "memory",
+		MaxTurns: 2,
+	})
+	if err != nil {
+		t.Fatalf("NewMemoryComponentFromSpec() error = %v", err)
+	}
+	memoryComponent := component.(*MemoryComponent)
+	if err := memoryComponent.Init(runtime.NewRuntime()); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	t.Cleanup(func() { _ = memoryComponent.Stop() })
+
+	if memoryComponent.memory != nil || memoryComponent.memoryCtx != nil {
+		t.Fatal("Init() initialized legacy HistoryMemory; want Store-only initialization")
+	}
+
+	history, err := memoryComponent.GetMemory()
+	if err != nil {
+		t.Fatalf("GetMemory() error = %v", err)
+	}
+	if history == nil || memoryComponent.GetContext() == nil {
+		t.Fatal("legacy HistoryMemory was not initialized on explicit request")
+	}
+}
+
+func assertConfiguredTurnLimit(t *testing.T, store conversationstore.Store, limit int) {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Now()
+	session := &conversationstore.Session{ID: "configured-limit", CreatedAt: now, UpdatedAt: now, Status: "active"}
+	if err := store.Create(ctx, session); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	for i := 0; i < limit; i++ {
+		if err := store.AddHistory(ctx, session.ID, ai.NewUserTextMessage("turn")); err != nil {
+			t.Fatalf("AddHistory(%d) error = %v", i, err)
+		}
+		if err := store.NextTurn(ctx, session.ID); err != nil {
+			t.Fatalf("NextTurn(%d) error = %v", i, err)
+		}
+	}
+	if err := store.AddHistory(ctx, session.ID, ai.NewUserTextMessage("overflow")); !errors.Is(err, conversationstore.ErrTurnLimitReached) {
+		t.Fatalf("overflow AddHistory() error = %v, want ErrTurnLimitReached", err)
 	}
 }

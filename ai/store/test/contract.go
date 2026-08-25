@@ -32,8 +32,11 @@ import (
 
 // RunStoreContractTests verifies behavior shared by every Store backend.
 // Backend-specific tests should call this function with their own constructor.
-func RunStoreContractTests(t *testing.T, newStore func() conversationstore.Store) {
+func RunStoreContractTests(t *testing.T, newStore func() conversationstore.Store, limit int) {
 	t.Helper()
+	if limit <= 0 {
+		t.Fatalf("contract test limit must be positive, got %d", limit)
+	}
 
 	t.Run("session lifecycle and history deletion", func(t *testing.T) {
 		ctx := context.Background()
@@ -221,7 +224,7 @@ func RunStoreContractTests(t *testing.T, newStore func() conversationstore.Store
 		if err := s.AddHistory(ctx, session.ID, ai.NewUserTextMessage("turn-0")); err != nil {
 			t.Fatalf("initial AddHistory() error = %v", err)
 		}
-		for i := 1; i < 10; i++ {
+		for i := 1; i < limit; i++ {
 			if err := s.NextTurn(ctx, session.ID); err != nil {
 				t.Fatalf("NextTurn() at turn %d error = %v", i-1, err)
 			}
@@ -229,15 +232,18 @@ func RunStoreContractTests(t *testing.T, newStore func() conversationstore.Store
 				t.Fatalf("AddHistory() at turn %d error = %v", i, err)
 			}
 		}
-		if err := s.NextTurn(ctx, session.ID); !errors.Is(err, conversationstore.ErrTurnLimitReached) {
-			t.Fatalf("full NextTurn() error = %v, want ErrTurnLimitReached", err)
+		if err := s.NextTurn(ctx, session.ID); err != nil {
+			t.Fatalf("final NextTurn() error = %v, want success", err)
 		}
-		messages, err := s.WindowMemory(ctx, session.ID)
+		if err := s.AddHistory(ctx, session.ID, ai.NewUserTextMessage("overflow")); !errors.Is(err, conversationstore.ErrTurnLimitReached) {
+			t.Fatalf("overflow AddHistory() error = %v, want ErrTurnLimitReached", err)
+		}
+		messages, err := s.AllMemory(ctx, session.ID)
 		if err != nil {
-			t.Fatalf("WindowMemory() after failed NextTurn error = %v", err)
+			t.Fatalf("AllMemory() after rejected turn error = %v", err)
 		}
-		if len(messages) != 1 || messages[0].Text() != "turn-9" {
-			t.Fatalf("active turn after failed NextTurn = %#v, want turn-9", messages)
+		if len(messages) != limit {
+			t.Fatalf("AllMemory() after rejected turn = %d messages, want %d", len(messages), limit)
 		}
 	})
 }

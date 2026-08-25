@@ -101,7 +101,7 @@ func (ra *ReActAgent) Interact(parent context.Context, input *schema.UserInput, 
 			return
 		}
 
-		if err := ra.messageStore.NextTurn(ctx, sessionID); err != nil {
+		if err := ra.messageStore.NextTurn(s.persistenceContext(ctx), sessionID); err != nil {
 			chans.ErrorChan <- fmt.Errorf("failed to complete turn: %w", err)
 			chans.Close()
 			return
@@ -140,6 +140,11 @@ func (ra *ReActAgent) newInteraction(parent context.Context, input *schema.UserI
 
 	ctx := context.WithValue(parent, sessionIDContextKey, sessionID)
 	ctx = withCurrentPageContext(ctx, input.Context)
-	s := &state{Input: input, Session: sessionID, Usage: &ai.GenerationUsage{}}
+	s := &state{
+		Input:      input,
+		Session:    sessionID,
+		persistCtx: context.WithoutCancel(parent),
+		Usage:      &ai.GenerationUsage{},
+	}
 	return ctx, s, nil
 }
