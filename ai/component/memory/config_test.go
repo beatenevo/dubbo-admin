@@ -169,14 +169,18 @@ func assertConfiguredTurnLimit(t *testing.T, store conversationstore.Store, limi
 		t.Fatalf("Create() error = %v", err)
 	}
 	for i := 0; i < limit; i++ {
-		if err := store.AddHistory(ctx, session.ID, ai.NewUserTextMessage("turn")); err != nil {
+		turnID, err := store.BeginTurn(ctx, session.ID)
+		if err != nil {
+			t.Fatalf("BeginTurn(%d) error = %v", i, err)
+		}
+		if err := store.AddHistoryToTurn(ctx, session.ID, turnID, ai.NewUserTextMessage("turn")); err != nil {
 			t.Fatalf("AddHistory(%d) error = %v", i, err)
 		}
-		if err := store.NextTurn(ctx, session.ID); err != nil {
+		if err := store.NextTurnForTurn(ctx, session.ID, turnID); err != nil {
 			t.Fatalf("NextTurn(%d) error = %v", i, err)
 		}
 	}
-	if err := store.AddHistory(ctx, session.ID, ai.NewUserTextMessage("overflow")); !errors.Is(err, conversationstore.ErrTurnLimitReached) {
-		t.Fatalf("overflow AddHistory() error = %v, want ErrTurnLimitReached", err)
+	if _, err := store.BeginTurn(ctx, session.ID); !errors.Is(err, conversationstore.ErrTurnLimitReached) {
+		t.Fatalf("overflow BeginTurn() error = %v, want ErrTurnLimitReached", err)
 	}
 }

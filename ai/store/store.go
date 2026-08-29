@@ -36,11 +36,12 @@ type SessionStore interface {
 
 // MessageStore persists conversation Turns and Genkit messages.
 type MessageStore interface {
-	AddHistory(ctx context.Context, sessionID string, messages ...*ai.Message) error
-	IsEmpty(ctx context.Context, sessionID string) (bool, error)
-	WindowMemory(ctx context.Context, sessionID string) ([]*ai.Message, error)
+	BeginTurn(ctx context.Context, sessionID string) (uint64, error)
+	AddHistoryToTurn(ctx context.Context, sessionID string, turnID uint64, messages ...*ai.Message) error
+	IsTurnEmpty(ctx context.Context, sessionID string, turnID uint64) (bool, error)
+	WindowMemoryForTurn(ctx context.Context, sessionID string, turnID uint64) ([]*ai.Message, error)
 	AllMemory(ctx context.Context, sessionID string) ([]*ai.Message, error)
-	NextTurn(ctx context.Context, sessionID string) error
+	NextTurnForTurn(ctx context.Context, sessionID string, turnID uint64) error
 }
 
 // Store combines the Session and conversation history contracts.

@@ -32,10 +32,12 @@ import (
 type state struct {
 	Input   *schema.UserInput
 	Session string
+	TurnID  uint64
 
 	// persistCtx is detached from the request cancellation so generated
 	// messages and turn finalization can finish after a client disconnects.
-	persistCtx context.Context
+	persistCtx    context.Context
+	persistCancel context.CancelFunc
 
 	Tools   *schema.ToolOutputs // reasonAct step writes
 	Observe *schema.Observation // observe step writes
@@ -50,6 +52,12 @@ func (s *state) persistenceContext(fallback context.Context) context.Context {
 		return s.persistCtx
 	}
 	return fallback
+}
+
+func (s *state) cancelPersistence() {
+	if s != nil && s.persistCancel != nil {
+		s.persistCancel()
+	}
 }
 
 // addUsage folds one or more model-call usages into the interaction total,

@@ -102,7 +102,11 @@ func TestMemoryToolReadsInjectedStore(t *testing.T) {
 	if err := store.Create(context.Background(), session); err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
-	if err := store.AddHistory(context.Background(), session.ID, ai.NewUserTextMessage("from shared store")); err != nil {
+	turnID, err := store.BeginTurn(context.Background(), session.ID)
+	if err != nil {
+		t.Fatalf("BeginTurn() error = %v", err)
+	}
+	if err := store.AddHistoryToTurn(context.Background(), session.ID, turnID, ai.NewUserTextMessage("from shared store")); err != nil {
 		t.Fatalf("AddHistory() error = %v", err)
 	}
 

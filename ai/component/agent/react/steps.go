@@ -71,14 +71,14 @@ func (ra *ReActAgent) reasonActStep(prompt ai.Prompt, chans *agent.Channels, tim
 		if err != nil {
 			return false, err
 		}
-		empty, err := ra.messageStore.IsEmpty(ctx, sessionID)
+		empty, err := ra.messageStore.IsTurnEmpty(ctx, sessionID, s.TurnID)
 		if err != nil {
 			return false, fmt.Errorf("failed to inspect history: %w", err)
 		}
 		if empty {
 			return false, fmt.Errorf("history is empty")
 		}
-		history, err := ra.messageStore.WindowMemory(ctx, sessionID)
+		history, err := ra.messageStore.WindowMemoryForTurn(ctx, sessionID, s.TurnID)
 		if err != nil {
 			return false, fmt.Errorf("failed to load history: %w", err)
 		}
@@ -105,7 +105,7 @@ func (ra *ReActAgent) reasonActStep(prompt ai.Prompt, chans *agent.Channels, tim
 		// the observe stage can build on it, and leave tool outputs empty.
 		if len(toolReqs) == 0 {
 			if text := resp.Text(); text != "" {
-				if err := ra.messageStore.AddHistory(s.persistenceContext(ctx), sessionID, ai.NewMessage(ai.RoleModel, nil, ai.NewTextPart(text))); err != nil {
+				if err := ra.messageStore.AddHistoryToTurn(s.persistenceContext(ctx), sessionID, s.TurnID, ai.NewMessage(ai.RoleModel, nil, ai.NewTextPart(text))); err != nil {
 					return false, fmt.Errorf("failed to record model message: %w", err)
 				}
 			}
@@ -141,7 +141,7 @@ func (ra *ReActAgent) reasonActStep(prompt ai.Prompt, chans *agent.Channels, tim
 		}
 		runtime.GetLogger().Info("act out:", "out", actOuts)
 		// ai.RoleTool's messages will be ignored by ai.WithMessages
-		if err := ra.messageStore.AddHistory(s.persistenceContext(ctx), sessionID, ai.NewMessage(ai.RoleModel, nil, parts...)); err != nil {
+		if err := ra.messageStore.AddHistoryToTurn(s.persistenceContext(ctx), sessionID, s.TurnID, ai.NewMessage(ai.RoleModel, nil, parts...)); err != nil {
 			return false, fmt.Errorf("failed to record model message: %w", err)
 		}
 		s.Tools = actOuts
@@ -158,14 +158,14 @@ func (ra *ReActAgent) observeStep(prompt ai.Prompt, chans *agent.Channels, timeo
 		if err != nil {
 			return false, err
 		}
-		empty, err := ra.messageStore.IsEmpty(ctx, sessionID)
+		empty, err := ra.messageStore.IsTurnEmpty(ctx, sessionID, s.TurnID)
 		if err != nil {
 			return false, fmt.Errorf("failed to inspect history: %w", err)
 		}
 		if empty {
 			return false, fmt.Errorf("history is empty")
 		}
-		history, err := ra.messageStore.WindowMemory(ctx, sessionID)
+		history, err := ra.messageStore.WindowMemoryForTurn(ctx, sessionID, s.TurnID)
 		if err != nil {
 			return false, fmt.Errorf("failed to load history: %w", err)
 		}
@@ -199,7 +199,7 @@ func (ra *ReActAgent) observeStep(prompt ai.Prompt, chans *agent.Channels, timeo
 		}
 		runtime.GetLogger().Info("Observe out:", "out", observation)
 
-		if err := ra.messageStore.AddHistory(s.persistenceContext(ctx), sessionID, ra.fallback.MarshalObservation(observation)); err != nil {
+		if err := ra.messageStore.AddHistoryToTurn(s.persistenceContext(ctx), sessionID, s.TurnID, ra.fallback.MarshalObservation(observation)); err != nil {
 			return false, fmt.Errorf("failed to record observation: %w", err)
 		}
 		observation.UsageInfo = s.Usage

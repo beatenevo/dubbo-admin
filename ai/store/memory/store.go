@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -52,53 +53,8 @@ func (t *turn) messages() []*ai.Message {
 	return messages
 }
 
-// turnWindow mirrors the current HistoryMemory window's bounded behavior. The
-// end index is intentionally monotonic, so a full window remains full after
-// repeated Pop/Push cycles just as it does in the existing implementation.
-type turnWindow struct {
-	limit int
-	begin int
-	end   int
-	data  []*turn
-}
-
-func newTurnWindow(limit int) *turnWindow {
-	return &turnWindow{limit: limit, data: make([]*turn, limit+1)}
-}
-
-func (w *turnWindow) empty() bool {
-	return w.begin == w.end
-}
-
-func (w *turnWindow) full() bool {
-	return w.end == w.limit
-}
-
-func (w *turnWindow) push(value *turn) bool {
-	if w.full() {
-		return false
-	}
-	w.data[w.end] = value
-	w.end++
-	return true
-}
-
-func (w *turnWindow) pop() *turn {
-	if w.empty() {
-		return nil
-	}
-	value := w.data[w.begin]
-	w.data[w.begin] = nil
-	w.begin++
-	return value
-}
-
-func (w *turnWindow) values() []*turn {
-	return w.data[w.begin:w.end]
-}
-
 type sessionHistory struct {
-	window  *turnWindow
+	active  map[uint64]*turn
 	history []*turn
 	nextID  uint64
 }
@@ -249,7 +205,27 @@ func (m *MemoryStore) DeleteExpired(ctx context.Context, now time.Time) (int, er
 	return deleted, nil
 }
 
-func (m *MemoryStore) AddHistory(ctx context.Context, sessionID string, messages ...*ai.Message) error {
+func (m *MemoryStore) BeginTurn(ctx context.Context, sessionID string) (uint64, error) {
+	if err := checkContext(ctx); err != nil {
+		return 0, err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.validateSessionLocked(sessionID); err != nil {
+		return 0, err
+	}
+	history := m.ensureHistoryLocked(sessionID)
+	if len(history.history)+len(history.active) >= m.limit {
+		return 0, fmt.Errorf("%w: current session's context is full, please create a new session", conversationstore.ErrTurnLimitReached)
+	}
+	history.nextID++
+	turnID := history.nextID
+	history.active[turnID] = &turn{id: turnID, createdAt: time.Now()}
+	return turnID, nil
+}
+
+func (m *MemoryStore) AddHistoryToTurn(ctx context.Context, sessionID string, turnID uint64, messages ...*ai.Message) error {
 	if err := checkContext(ctx); err != nil {
 		return err
 	}
@@ -259,39 +235,24 @@ func (m *MemoryStore) AddHistory(ctx context.Context, sessionID string, messages
 	if err := m.validateSessionLocked(sessionID); err != nil {
 		return err
 	}
-
-	history := m.ensureHistoryLocked(sessionID)
-	if history.window.empty() {
-		if len(history.history) >= m.limit {
-			return fmt.Errorf("%w: current session's context is full, please create a new session", conversationstore.ErrTurnLimitReached)
-		}
-		history.nextID++
-		if !history.window.push(&turn{id: history.nextID, createdAt: time.Now()}) {
-			return fmt.Errorf("failed to create active turn: %w", conversationstore.ErrTurnLimitReached)
-		}
+	history := m.history[sessionID]
+	if history == nil || history.active == nil {
+		return conversationstore.ErrTurnNotFound
 	}
-	active := history.window.values()[len(history.window.values())-1]
-	for _, message := range messages {
-		if message == nil || !supportedRole(message.Role) {
-			continue
+	active, ok := history.active[turnID]
+	if !ok {
+		return conversationstore.ErrTurnNotFound
+	}
+	if err := appendMessages(active, messages...); err != nil {
+		if len(active.messages()) == 0 {
+			delete(history.active, turnID)
 		}
-		copy, err := cloneMessage(message)
-		if err != nil {
-			return fmt.Errorf("failed to copy message: %w", err)
-		}
-		switch copy.Role {
-		case ai.RoleSystem:
-			active.systemMessages = append(active.systemMessages, copy)
-		case ai.RoleUser:
-			active.userMessages = append(active.userMessages, copy)
-		case ai.RoleModel:
-			active.modelMessages = append(active.modelMessages, copy)
-		}
+		return err
 	}
 	return nil
 }
 
-func (m *MemoryStore) IsEmpty(ctx context.Context, sessionID string) (bool, error) {
+func (m *MemoryStore) IsTurnEmpty(ctx context.Context, sessionID string, turnID uint64) (bool, error) {
 	if err := checkContext(ctx); err != nil {
 		return false, err
 	}
@@ -299,10 +260,19 @@ func (m *MemoryStore) IsEmpty(ctx context.Context, sessionID string) (bool, erro
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	history := m.history[sessionID]
-	return history == nil || history.window == nil || history.window.empty(), nil
+	if history == nil || history.active == nil {
+		return false, conversationstore.ErrTurnNotFound
+	}
+	_, ok := history.active[turnID]
+	if !ok {
+		return false, conversationstore.ErrTurnNotFound
+	}
+	// An active Turn exists even when AddHistory received only nil or
+	// unsupported messages; this preserves the historical IsEmpty contract.
+	return false, nil
 }
 
-func (m *MemoryStore) WindowMemory(ctx context.Context, sessionID string) ([]*ai.Message, error) {
+func (m *MemoryStore) WindowMemoryForTurn(ctx context.Context, sessionID string, turnID uint64) ([]*ai.Message, error) {
 	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
@@ -310,10 +280,14 @@ func (m *MemoryStore) WindowMemory(ctx context.Context, sessionID string) ([]*ai
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	history := m.history[sessionID]
-	if history == nil || history.window == nil {
-		return nil, nil
+	if history == nil || history.active == nil {
+		return nil, conversationstore.ErrTurnNotFound
 	}
-	return cloneTurnList(history.window.values())
+	active, ok := history.active[turnID]
+	if !ok {
+		return nil, conversationstore.ErrTurnNotFound
+	}
+	return cloneTurnList([]*turn{active})
 }
 
 func (m *MemoryStore) AllMemory(ctx context.Context, sessionID string) ([]*ai.Message, error) {
@@ -324,16 +298,23 @@ func (m *MemoryStore) AllMemory(ctx context.Context, sessionID string) ([]*ai.Me
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	history := m.history[sessionID]
-	if history == nil || history.window == nil {
+	if history == nil || history.active == nil {
 		return nil, nil
 	}
-	turns := make([]*turn, 0, len(history.window.values())+len(history.history))
-	turns = append(turns, history.window.values()...)
+	activeIDs := make([]uint64, 0, len(history.active))
+	for turnID := range history.active {
+		activeIDs = append(activeIDs, turnID)
+	}
+	sort.Slice(activeIDs, func(i, j int) bool { return activeIDs[i] < activeIDs[j] })
+	turns := make([]*turn, 0, len(activeIDs)+len(history.history))
+	for _, turnID := range activeIDs {
+		turns = append(turns, history.active[turnID])
+	}
 	turns = append(turns, history.history...)
 	return cloneTurnList(turns)
 }
 
-func (m *MemoryStore) NextTurn(ctx context.Context, sessionID string) error {
+func (m *MemoryStore) NextTurnForTurn(ctx context.Context, sessionID string, turnID uint64) error {
 	if err := checkContext(ctx); err != nil {
 		return err
 	}
@@ -344,15 +325,103 @@ func (m *MemoryStore) NextTurn(ctx context.Context, sessionID string) error {
 		return err
 	}
 	history := m.history[sessionID]
-	if history == nil || history.window == nil || history.window.empty() {
-		return conversationstore.ErrNoActiveTurn
+	if history == nil || history.active == nil {
+		return conversationstore.ErrTurnNotFound
+	}
+	completed, ok := history.active[turnID]
+	if !ok {
+		return conversationstore.ErrTurnNotFound
 	}
 	if len(history.history) >= m.limit {
 		return fmt.Errorf("%w: current session's context is full, please create a new session", conversationstore.ErrTurnLimitReached)
 	}
-	completed := history.window.pop()
+	delete(history.active, turnID)
 	history.history = append(history.history, completed)
 	return nil
+}
+
+// AddHistory is retained for callers of the pre-Store API. Production code
+// must use BeginTurn and AddHistoryToTurn so concurrent interactions cannot
+// share an active Turn.
+func (m *MemoryStore) AddHistory(ctx context.Context, sessionID string, messages ...*ai.Message) error {
+	if err := checkContext(ctx); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.validateSessionLocked(sessionID); err != nil {
+		return err
+	}
+	history := m.ensureHistoryLocked(sessionID)
+	if len(history.active) == 0 {
+		if len(history.history) >= m.limit {
+			return fmt.Errorf("%w: current session's context is full, please create a new session", conversationstore.ErrTurnLimitReached)
+		}
+		history.nextID++
+		history.active[history.nextID] = &turn{id: history.nextID, createdAt: time.Now()}
+	}
+	if len(history.active) != 1 {
+		return fmt.Errorf("session %q has multiple active turns; use AddHistoryToTurn", sessionID)
+	}
+	var active *turn
+	for _, candidate := range history.active {
+		active = candidate
+	}
+	return appendMessages(active, messages...)
+}
+
+// IsEmpty is retained for compatibility with the pre-Store API.
+func (m *MemoryStore) IsEmpty(ctx context.Context, sessionID string) (bool, error) {
+	if err := checkContext(ctx); err != nil {
+		return false, err
+	}
+	m.mu.RLock()
+	history := m.history[sessionID]
+	activeCount := 0
+	if history != nil {
+		activeCount = len(history.active)
+	}
+	m.mu.RUnlock()
+	return activeCount == 0, nil
+}
+
+// WindowMemory is retained for compatibility with the pre-Store API. It is
+// only unambiguous when one active Turn exists.
+func (m *MemoryStore) WindowMemory(ctx context.Context, sessionID string) ([]*ai.Message, error) {
+	if err := checkContext(ctx); err != nil {
+		return nil, err
+	}
+	m.mu.RLock()
+	history := m.history[sessionID]
+	var turnID uint64
+	if history != nil && len(history.active) == 1 {
+		for id := range history.active {
+			turnID = id
+		}
+	}
+	m.mu.RUnlock()
+	if turnID == 0 {
+		return nil, nil
+	}
+	return m.WindowMemoryForTurn(ctx, sessionID, turnID)
+}
+
+// NextTurn is retained for compatibility with the pre-Store API. Production
+// code must finalize a specific Turn with NextTurnForTurn.
+func (m *MemoryStore) NextTurn(ctx context.Context, sessionID string) error {
+	m.mu.RLock()
+	history := m.history[sessionID]
+	var turnID uint64
+	if history != nil && len(history.active) == 1 {
+		for id := range history.active {
+			turnID = id
+		}
+	}
+	m.mu.RUnlock()
+	if turnID == 0 {
+		return conversationstore.ErrNoActiveTurn
+	}
+	return m.NextTurnForTurn(ctx, sessionID, turnID)
 }
 
 func (m *MemoryStore) validateSessionLocked(sessionID string) error {
@@ -372,7 +441,7 @@ func (m *MemoryStore) validateSessionLocked(sessionID string) error {
 func (m *MemoryStore) ensureHistoryLocked(sessionID string) *sessionHistory {
 	history := m.history[sessionID]
 	if history == nil {
-		history = &sessionHistory{window: newTurnWindow(m.limit)}
+		history = &sessionHistory{active: make(map[uint64]*turn)}
 		m.history[sessionID] = history
 	}
 	return history
@@ -393,6 +462,32 @@ func cloneTurnList(turns []*turn) ([]*ai.Message, error) {
 		}
 	}
 	return result, nil
+}
+
+func appendMessages(active *turn, messages ...*ai.Message) error {
+	var system, user, model []*ai.Message
+	for _, message := range messages {
+		if message == nil || !supportedRole(message.Role) {
+			continue
+		}
+		copy, err := cloneMessage(message)
+		if err != nil {
+			return fmt.Errorf("failed to copy message: %w", err)
+		}
+		switch copy.Role {
+		case ai.RoleSystem:
+			system = append(system, copy)
+		case ai.RoleUser:
+			user = append(user, copy)
+		case ai.RoleModel:
+			model = append(model, copy)
+		}
+	}
+	// Mutate the Turn only after the complete input batch has been cloned.
+	active.systemMessages = append(active.systemMessages, system...)
+	active.userMessages = append(active.userMessages, user...)
+	active.modelMessages = append(active.modelMessages, model...)
+	return nil
 }
 
 func cloneMessage(message *ai.Message) (*ai.Message, error) {

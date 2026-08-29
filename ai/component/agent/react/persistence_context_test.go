@@ -36,20 +36,23 @@ type recordingStore struct {
 	addContexts  []context.Context
 	nextContexts []context.Context
 	nextContext  chan context.Context
+	nextRelease  chan struct{}
 }
 
-func (s *recordingStore) AddHistory(ctx context.Context, sessionID string, messages ...*ai.Message) error {
+func (s *recordingStore) AddHistoryToTurn(ctx context.Context, sessionID string, turnID uint64, messages ...*ai.Message) error {
 	s.addContexts = append(s.addContexts, ctx)
-	return s.Store.AddHistory(ctx, sessionID, messages...)
+	return s.Store.AddHistoryToTurn(ctx, sessionID, turnID, messages...)
 }
 
-func (s *recordingStore) NextTurn(ctx context.Context, sessionID string) error {
+func (s *recordingStore) NextTurnForTurn(ctx context.Context, sessionID string, turnID uint64) error {
 	s.nextContexts = append(s.nextContexts, ctx)
-	err := s.Store.NextTurn(ctx, sessionID)
-	if err == nil && s.nextContext != nil {
+	if s.nextContext != nil {
 		s.nextContext <- ctx
 	}
-	return err
+	if s.nextRelease != nil {
+		<-s.nextRelease
+	}
+	return s.Store.NextTurnForTurn(ctx, sessionID, turnID)
 }
 
 func TestGeneratedMessageUsesDetachedPersistenceContext(t *testing.T) {
@@ -75,8 +78,9 @@ func TestGeneratedMessageUsesDetachedPersistenceContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newInteraction() error = %v", err)
 	}
+	defer state.cancelPersistence()
 	if state.persistCtx == nil || state.persistCtx.Err() != nil {
-		t.Fatalf("persistCtx = %v, want a non-cancelable context", state.persistCtx)
+		t.Fatalf("persistCtx = %v, want an active context", state.persistCtx)
 	}
 
 	if _, err := ra.reasonActStep(&stubPrompt{resp: textResp("answer")}, nil, 0)(ctx, state); err != nil {
@@ -107,7 +111,8 @@ func TestInteractionFinalizationUsesDetachedContext(t *testing.T) {
 		t.Fatalf("Create() error = %v", err)
 	}
 	nextContext := make(chan context.Context, 1)
-	store := &recordingStore{Store: backing, nextContext: nextContext}
+	nextRelease := make(chan struct{})
+	store := &recordingStore{Store: backing, nextContext: nextContext, nextRelease: nextRelease}
 	ra := &ReActAgent{messageStore: store, bufferSize: 1}
 	requestCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -124,6 +129,24 @@ func TestInteractionFinalizationUsesDetachedContext(t *testing.T) {
 		t.Fatal("request context was not canceled")
 	}
 	if persistCtx.Err() != nil {
-		t.Fatalf("NextTurn context error = %v, want nil after request cancellation", persistCtx.Err())
+		t.Fatalf("NextTurn context error = %v, want active after request cancellation", persistCtx.Err())
+	}
+	close(nextRelease)
+
+	deadline, ok := persistCtx.Deadline()
+	if !ok {
+		t.Fatal("NextTurn context has no deadline")
+	}
+	if remaining := time.Until(deadline); remaining <= 0 || remaining > persistenceTimeout {
+		t.Fatalf("persistence deadline remaining = %v, want within %v", remaining, persistenceTimeout)
+	}
+
+	select {
+	case <-persistCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for interaction completion")
+	}
+	if persistCtx.Err() != context.Canceled {
+		t.Fatalf("persist context error = %v, want context.Canceled after interaction completion", persistCtx.Err())
 	}
 }

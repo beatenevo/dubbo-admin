@@ -18,6 +18,7 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -26,6 +27,7 @@ import (
 	"dubbo-admin-ai/component/server/engine/sse"
 	rt "dubbo-admin-ai/runtime"
 	"dubbo-admin-ai/schema"
+	conversationstore "dubbo-admin-ai/store"
 
 	"github.com/gin-gonic/gin"
 )
@@ -68,11 +70,11 @@ func (h *AgentHandler) StreamChat(c *gin.Context) {
 	sessionID = req.SessionID
 	requestCtx := c.Request.Context()
 	if _, err = h.sessionMgr.GetSession(requestCtx, sessionID); err != nil {
-		c.JSON(http.StatusBadRequest, NewErrorResponse("Invalid session ID: "+err.Error()))
+		h.writeSessionError(c, "Invalid session ID", err, http.StatusBadRequest)
 		return
 	}
 	if err = h.sessionMgr.TouchSession(requestCtx, sessionID); err != nil {
-		c.JSON(http.StatusBadRequest, NewErrorResponse("Invalid session ID: "+err.Error()))
+		h.writeSessionError(c, "Invalid session ID", err, http.StatusBadRequest)
 		return
 	}
 
@@ -89,15 +91,17 @@ func (h *AgentHandler) StreamChat(c *gin.Context) {
 	}()
 
 	channels = h.agent.Interact(requestCtx, &schema.UserInput{Content: req.Message, Context: pageContext}, sessionID)
+	userRespChan := channels.UserRespChan
+	errorChan := channels.ErrorChan
 	var (
 		feedback *schema.StreamFeedback
 		ok       bool
 	)
 	for {
 		select {
-		case err, ok = <-channels.ErrorChan:
+		case err, ok = <-errorChan:
 			if !ok {
-				channels.ErrorChan = nil
+				errorChan = nil
 				continue
 			}
 			if err != nil {
@@ -106,9 +110,9 @@ func (h *AgentHandler) StreamChat(c *gin.Context) {
 				channels.Close()
 				return
 			}
-		case feedback, ok = <-channels.UserRespChan:
+		case feedback, ok = <-userRespChan:
 			if !ok {
-				channels.UserRespChan = nil
+				userRespChan = nil
 				continue
 			}
 			rt.GetLogger().Info("Handler received feedback",
@@ -134,23 +138,20 @@ func (h *AgentHandler) StreamChat(c *gin.Context) {
 			rt.GetLogger().Info("Client disconnected from stream")
 			return
 
-		default:
-			if !channels.Closed() {
-				continue
-			}
+		case <-channels.Done():
 			rt.GetLogger().Info("Channels closed, draining remaining messages", "session_id", sessionID)
 		drainLoop:
 			for {
 				select {
-				case feedback, ok = <-channels.UserRespChan:
+				case feedback, ok = <-userRespChan:
 					if !ok {
-						channels.UserRespChan = nil
+						userRespChan = nil
 						break drainLoop
 					}
 					h.writeFeedback(sseHandler, feedback)
-				case err, ok = <-channels.ErrorChan:
+				case err, ok = <-errorChan:
 					if !ok {
-						channels.ErrorChan = nil
+						errorChan = nil
 						break drainLoop
 					}
 					if err != nil {
@@ -190,6 +191,17 @@ func (h *AgentHandler) MessageDelta(sseHandler *sse.SSEHandler, output schema.Sc
 	}
 }
 
+func (h *AgentHandler) writeSessionError(c *gin.Context, message string, err error, invalidStatus int) {
+	status := http.StatusInternalServerError
+	responseMessage := "Session storage unavailable"
+	if errors.Is(err, conversationstore.ErrSessionNotFound) || errors.Is(err, conversationstore.ErrSessionExpired) {
+		status = invalidStatus
+		responseMessage = message + ": " + err.Error()
+	}
+	rt.GetLogger().Error("Session store request failed", "error", err)
+	c.JSON(status, NewErrorResponse(responseMessage))
+}
+
 func (h *AgentHandler) CreateSession(c *gin.Context) {
 	sessionObj, err := h.sessionMgr.CreateSession(c.Request.Context())
 	if err != nil {
@@ -208,7 +220,7 @@ func (h *AgentHandler) GetSession(c *gin.Context) {
 
 	sessionObj, err := h.sessionMgr.GetSession(c.Request.Context(), sessionID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, NewErrorResponse("Session not found: "+err.Error()))
+		h.writeSessionError(c, "Session not found", err, http.StatusNotFound)
 		return
 	}
 	c.JSON(http.StatusOK, NewSuccessResponse(toSessionInfo(sessionObj)))
@@ -241,7 +253,7 @@ func (h *AgentHandler) DeleteSession(c *gin.Context) {
 	}
 
 	if err := h.sessionMgr.DeleteSession(c.Request.Context(), sessionID); err != nil {
-		c.JSON(http.StatusNotFound, NewErrorResponse("Session not found: "+err.Error()))
+		h.writeSessionError(c, "Session not found", err, http.StatusNotFound)
 		return
 	}
 

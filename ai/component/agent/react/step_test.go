@@ -48,7 +48,7 @@ func (s *stubPrompt) Render(ctx context.Context, input any) (*ai.GenerateActionO
 	return &ai.GenerateActionOptions{}, nil
 }
 
-func contextWithHistory(s conversationstore.Store, sessionID string) context.Context {
+func contextWithHistory(s conversationstore.Store, sessionID string) (context.Context, uint64) {
 	now := time.Now()
 	if err := s.Create(context.Background(), &conversationstore.Session{
 		ID:        sessionID,
@@ -58,10 +58,14 @@ func contextWithHistory(s conversationstore.Store, sessionID string) context.Con
 	}); err != nil {
 		panic(err)
 	}
-	if err := s.AddHistory(context.Background(), sessionID, ai.NewUserMessage(ai.NewTextPart("hello"))); err != nil {
+	turnID, err := s.BeginTurn(context.Background(), sessionID)
+	if err != nil {
 		panic(err)
 	}
-	return context.WithValue(context.Background(), sessionIDContextKey, sessionID)
+	if err := s.AddHistoryToTurn(context.Background(), sessionID, turnID, ai.NewUserMessage(ai.NewTextPart("hello"))); err != nil {
+		panic(err)
+	}
+	return context.WithValue(context.Background(), sessionIDContextKey, sessionID), turnID
 }
 
 func testAgent(g *genkit.Genkit) (*ReActAgent, conversationstore.Store) {
@@ -137,7 +141,9 @@ func TestReasonActStep(t *testing.T) {
 			ra, backingStore := testAgent(g)
 			s := &state{Input: &schema.UserInput{Content: "hi"}, Session: "session", Usage: &ai.GenerationUsage{}}
 
-			done, err := ra.reasonActStep(tt.setup(g), nil, 0)(contextWithHistory(backingStore, "session"), s)
+			ctx, turnID := contextWithHistory(backingStore, "session")
+			s.TurnID = turnID
+			done, err := ra.reasonActStep(tt.setup(g), nil, 0)(ctx, s)
 			if tt.errContain != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.errContain) {
 					t.Fatalf("expected error containing %q, got %v", tt.errContain, err)
@@ -167,7 +173,9 @@ func TestReasonActStepExecuteError(t *testing.T) {
 		}
 	}()
 
-	_, err := ra.reasonActStep(prompt, nil, 0)(contextWithHistory(backingStore, "s3"), s)
+	ctx, turnID := contextWithHistory(backingStore, "s3")
+	s.TurnID = turnID
+	_, err := ra.reasonActStep(prompt, nil, 0)(ctx, s)
 	if err == nil || !strings.Contains(err.Error(), "failed to execute reasonAct prompt") {
 		t.Fatalf("expected wrapped execute error, got %v", err)
 	}

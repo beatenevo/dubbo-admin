@@ -15,14 +15,31 @@
  * limitations under the License.
  */
 
-package store
+package agent
 
-import "errors"
-
-var (
-	ErrSessionNotFound  = errors.New("session not found")
-	ErrSessionExpired   = errors.New("session expired")
-	ErrNoActiveTurn     = errors.New("no active turn")
-	ErrTurnNotFound     = errors.New("turn not found")
-	ErrTurnLimitReached = errors.New("conversation turn limit reached")
+import (
+	"sync"
+	"testing"
 )
+
+func TestChannelsCloseNotifiesDone(t *testing.T) {
+	channels := NewChannels(1)
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			channels.Close()
+		}()
+	}
+	wg.Wait()
+
+	if !channels.Closed() {
+		t.Fatal("Closed() = false, want true")
+	}
+	select {
+	case <-channels.Done():
+	default:
+		t.Fatal("Done() was not closed")
+	}
+}

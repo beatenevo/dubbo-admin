@@ -32,6 +32,7 @@ import (
 )
 
 const sessionExpiration = 24 * time.Hour
+const expirationCleanupBatchSize = 100
 
 // DefaultMaxTurns matches MemorySpec's default conversation limit.
 const DefaultMaxTurns = 100
@@ -179,46 +180,90 @@ func (s *GormStore) DeleteExpired(ctx context.Context, now time.Time) (int, erro
 	}
 	cutoff := now.Add(-sessionExpiration)
 	deleted := 0
-	err := s.db.WithContext(normalizeContext(ctx)).Transaction(func(tx *gorm.DB) error {
-		query := tx.Where("updated_at < ?", cutoff)
-		if supportsRowLock(tx) {
-			query = query.Clauses(clause.Locking{Strength: "UPDATE"})
-		}
-		var sessions []SessionModel
-		if err := query.Find(&sessions).Error; err != nil {
-			return err
-		}
-		for i := range sessions {
-			// Re-read the row after acquiring the transaction lock. This prevents
-			// cleanup from deleting a session refreshed by another instance.
-			current, err := s.findSession(tx, sessions[i].ID, true)
-			if err != nil {
-				if errors.Is(err, conversationstore.ErrSessionNotFound) {
+	for {
+		batchDeleted := 0
+		batchSize := 0
+		err := s.db.WithContext(normalizeContext(ctx)).Transaction(func(tx *gorm.DB) error {
+			query := tx.Where("updated_at < ?", cutoff).Order("updated_at ASC").Limit(expirationCleanupBatchSize)
+			if supportsRowLock(tx) {
+				query = query.Clauses(clause.Locking{Strength: "UPDATE"})
+			}
+			var sessions []SessionModel
+			if err := query.Find(&sessions).Error; err != nil {
+				return err
+			}
+			batchSize = len(sessions)
+			for i := range sessions {
+				// Re-read the row after acquiring the transaction lock. This prevents
+				// cleanup from deleting a session refreshed by another instance.
+				current, err := s.findSession(tx, sessions[i].ID, true)
+				if err != nil {
+					if errors.Is(err, conversationstore.ErrSessionNotFound) {
+						continue
+					}
+					return err
+				}
+				if !isExpired(current.UpdatedAt, now) {
 					continue
 				}
-				return err
+				if err := deleteSessionData(tx, sessions[i].ID); err != nil {
+					return err
+				}
+				batchDeleted++
 			}
-			if !isExpired(current.UpdatedAt, now) {
-				continue
-			}
-			if err := deleteSessionData(tx, sessions[i].ID); err != nil {
-				return err
-			}
-			deleted++
+			return nil
+		})
+		if err != nil {
+			return deleted, err
 		}
-		return nil
-	})
-	if err != nil {
-		return 0, err
+		deleted += batchDeleted
+		if batchSize < expirationCleanupBatchSize {
+			return deleted, nil
+		}
 	}
-	return deleted, nil
 }
 
-func (s *GormStore) AddHistory(ctx context.Context, sessionID string, messages ...*ai.Message) error {
+func (s *GormStore) BeginTurn(ctx context.Context, sessionID string) (uint64, error) {
+	if err := s.checkContext(ctx); err != nil {
+		return 0, err
+	}
+	var turnID uint64
+	err := s.db.WithContext(normalizeContext(ctx)).Transaction(func(tx *gorm.DB) error {
+		model, err := s.findSession(tx, sessionID, true)
+		if err != nil {
+			return err
+		}
+		if model.Status != "active" {
+			return fmt.Errorf("session %q is not active", sessionID)
+		}
+		if isExpired(model.UpdatedAt, time.Now()) {
+			return conversationstore.ErrSessionExpired
+		}
+
+		var turnCount int64
+		if err := tx.Model(&TurnModel{}).
+			Where("session_id = ?", sessionID).
+			Count(&turnCount).Error; err != nil {
+			return err
+		}
+		if turnCount >= int64(s.limit) {
+			return fmt.Errorf("%w: current session's context is full, please create a new session", conversationstore.ErrTurnLimitReached)
+		}
+		turn := TurnModel{SessionID: sessionID, CreatedAt: time.Now()}
+		if err := tx.Create(&turn).Error; err != nil {
+			return err
+		}
+		turnID = turn.ID
+		return nil
+	})
+	return turnID, err
+}
+
+func (s *GormStore) AddHistoryToTurn(ctx context.Context, sessionID string, turnID uint64, messages ...*ai.Message) error {
 	if err := s.checkContext(ctx); err != nil {
 		return err
 	}
-	return s.db.WithContext(normalizeContext(ctx)).Transaction(func(tx *gorm.DB) error {
+	err := s.db.WithContext(normalizeContext(ctx)).Transaction(func(tx *gorm.DB) error {
 		model, err := s.findSession(tx, sessionID, true)
 		if err != nil {
 			return err
@@ -231,126 +276,110 @@ func (s *GormStore) AddHistory(ctx context.Context, sessionID string, messages .
 		}
 
 		var turn TurnModel
-		err = tx.Where("session_id = ? AND completed_at IS NULL", sessionID).
-			Order("id DESC").First(&turn).Error
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			var completedCount int64
-			if err := tx.Model(&TurnModel{}).
-				Where("session_id = ? AND completed_at IS NOT NULL", sessionID).
-				Count(&completedCount).Error; err != nil {
-				return err
-			}
-			if completedCount >= int64(s.limit) {
-				return fmt.Errorf("%w: current session's context is full, please create a new session", conversationstore.ErrTurnLimitReached)
-			}
-			turn = TurnModel{SessionID: sessionID, CreatedAt: time.Now()}
-			if err := tx.Create(&turn).Error; err != nil {
-				return err
-			}
+		if err := tx.Where("id = ? AND session_id = ?", turnID, sessionID).First(&turn).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+			return conversationstore.ErrTurnNotFound
 		} else if err != nil {
 			return err
 		}
+		if turn.CompletedAt != nil {
+			return conversationstore.ErrTurnNotFound
+		}
 
-		var last MessageModel
-		err = tx.Where("turn_id = ?", turn.ID).Order("sequence DESC").First(&last).Error
-		nextSequence := uint64(0)
-		if err == nil {
-			nextSequence = last.Sequence + 1
-		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return insertMessages(tx, turn.ID, messages)
+	})
+	if err != nil {
+		// BeginTurn is intentionally separate from message persistence. If this
+		// first write failed before any message was stored, remove only the empty
+		// Turn so a failed interaction does not leave an orphan active Turn.
+		_ = s.deleteEmptyTurn(ctx, sessionID, turnID)
+	}
+	return err
+}
+
+func (s *GormStore) deleteEmptyTurn(ctx context.Context, sessionID string, turnID uint64) error {
+	return s.db.WithContext(normalizeContext(ctx)).Transaction(func(tx *gorm.DB) error {
+		session, err := s.findSession(tx, sessionID, false)
+		if err != nil || session.Status != "active" || isExpired(session.UpdatedAt, time.Now()) {
+			return nil
+		}
+		var count int64
+		if err := tx.Model(&MessageModel{}).Where("turn_id = ?", turnID).Count(&count).Error; err != nil {
 			return err
 		}
-		for _, message := range messages {
-			if message == nil || !supportedRole(message.Role) {
-				continue
-			}
-			payload, err := encodeMessage(message)
-			if err != nil {
-				return fmt.Errorf("failed to encode message: %w", err)
-			}
-			stored := MessageModel{
-				TurnID:    turn.ID,
-				Sequence:  nextSequence,
-				Payload:   payload,
-				CreatedAt: time.Now(),
-			}
-			if err := tx.Create(&stored).Error; err != nil {
-				return err
-			}
-			nextSequence++
+		if count != 0 {
+			return nil
 		}
-		return nil
+		return tx.Where("id = ? AND session_id = ? AND completed_at IS NULL", turnID, sessionID).Delete(&TurnModel{}).Error
 	})
 }
 
-func (s *GormStore) IsEmpty(ctx context.Context, sessionID string) (bool, error) {
+func (s *GormStore) IsTurnEmpty(ctx context.Context, sessionID string, turnID uint64) (bool, error) {
 	if err := s.checkContext(ctx); err != nil {
 		return false, err
 	}
 	var turn TurnModel
 	err := s.db.WithContext(normalizeContext(ctx)).
-		Where("session_id = ? AND completed_at IS NULL", sessionID).
+		Where("id = ? AND session_id = ? AND completed_at IS NULL", turnID, sessionID).
 		First(&turn).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return true, nil
+		return false, conversationstore.ErrTurnNotFound
 	}
-	return false, err
+	if err != nil {
+		return false, err
+	}
+	// An active Turn exists even when no supported messages were supplied.
+	return false, nil
 }
 
-func (s *GormStore) WindowMemory(ctx context.Context, sessionID string) ([]*ai.Message, error) {
+func (s *GormStore) WindowMemoryForTurn(ctx context.Context, sessionID string, turnID uint64) ([]*ai.Message, error) {
 	if err := s.checkContext(ctx); err != nil {
 		return nil, err
 	}
 	var turn TurnModel
 	err := s.db.WithContext(normalizeContext(ctx)).
-		Where("session_id = ? AND completed_at IS NULL", sessionID).
+		Where("id = ? AND session_id = ? AND completed_at IS NULL", turnID, sessionID).
 		First(&turn).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, nil
+		return nil, conversationstore.ErrTurnNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-	return s.readTurnMessages(ctx, turn.ID)
+	return readTurnMessages(s.db, normalizeContext(ctx), turn.ID)
 }
 
 func (s *GormStore) AllMemory(ctx context.Context, sessionID string) ([]*ai.Message, error) {
 	if err := s.checkContext(ctx); err != nil {
 		return nil, err
 	}
-	var active *TurnModel
-	var activeModel TurnModel
-	err := s.db.WithContext(normalizeContext(ctx)).
-		Where("session_id = ? AND completed_at IS NULL", sessionID).
-		First(&activeModel).Error
-	if err == nil {
-		active = &activeModel
-	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, err
-	}
-
-	var completed []TurnModel
-	if err := s.db.WithContext(normalizeContext(ctx)).
-		Where("session_id = ? AND completed_at IS NOT NULL", sessionID).
-		Order("id ASC").Find(&completed).Error; err != nil {
-		return nil, err
-	}
-	turns := make([]TurnModel, 0, len(completed)+1)
-	if active != nil {
-		turns = append(turns, *active)
-	}
-	turns = append(turns, completed...)
 	var result []*ai.Message
-	for i := range turns {
-		messages, err := s.readTurnMessages(ctx, turns[i].ID)
-		if err != nil {
-			return nil, err
+	err := s.db.WithContext(normalizeContext(ctx)).Transaction(func(tx *gorm.DB) error {
+		var active []TurnModel
+		if err := tx.Where("session_id = ? AND completed_at IS NULL", sessionID).
+			Order("id ASC").Find(&active).Error; err != nil {
+			return err
 		}
-		result = append(result, messages...)
-	}
-	return result, nil
+		var completed []TurnModel
+		if err := tx.Where("session_id = ? AND completed_at IS NOT NULL", sessionID).
+			Order("id ASC").Find(&completed).Error; err != nil {
+			return err
+		}
+		turns := make([]TurnModel, 0, len(completed)+len(active))
+		turns = append(turns, active...)
+		turns = append(turns, completed...)
+		for i := range turns {
+			messages, err := readTurnMessages(tx, normalizeContext(ctx), turns[i].ID)
+			if err != nil {
+				return err
+			}
+			result = append(result, messages...)
+		}
+		return nil
+	})
+	return result, err
 }
 
-func (s *GormStore) NextTurn(ctx context.Context, sessionID string) error {
+func (s *GormStore) NextTurnForTurn(ctx context.Context, sessionID string, turnID uint64) error {
 	if err := s.checkContext(ctx); err != nil {
 		return err
 	}
@@ -366,8 +395,8 @@ func (s *GormStore) NextTurn(ctx context.Context, sessionID string) error {
 			return conversationstore.ErrSessionExpired
 		}
 		var active TurnModel
-		if err := tx.Where("session_id = ? AND completed_at IS NULL", sessionID).First(&active).Error; errors.Is(err, gorm.ErrRecordNotFound) {
-			return conversationstore.ErrNoActiveTurn
+		if err := tx.Where("id = ? AND session_id = ? AND completed_at IS NULL", turnID, sessionID).First(&active).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+			return conversationstore.ErrTurnNotFound
 		} else if err != nil {
 			return err
 		}
@@ -385,9 +414,127 @@ func (s *GormStore) NextTurn(ctx context.Context, sessionID string) error {
 	})
 }
 
-func (s *GormStore) readTurnMessages(ctx context.Context, turnID uint64) ([]*ai.Message, error) {
+// AddHistory is retained for callers of the pre-Store API. Production code
+// must use BeginTurn and AddHistoryToTurn to isolate concurrent interactions.
+func (s *GormStore) AddHistory(ctx context.Context, sessionID string, messages ...*ai.Message) error {
+	if err := s.checkContext(ctx); err != nil {
+		return err
+	}
+	return s.db.WithContext(normalizeContext(ctx)).Transaction(func(tx *gorm.DB) error {
+		model, err := s.findSession(tx, sessionID, true)
+		if err != nil {
+			return err
+		}
+		if model.Status != "active" {
+			return fmt.Errorf("session %q is not active", sessionID)
+		}
+		if isExpired(model.UpdatedAt, time.Now()) {
+			return conversationstore.ErrSessionExpired
+		}
+		var active []TurnModel
+		if err := tx.Where("session_id = ? AND completed_at IS NULL", sessionID).Order("id ASC").Find(&active).Error; err != nil {
+			return err
+		}
+		var turn TurnModel
+		switch len(active) {
+		case 0:
+			var completedCount int64
+			if err := tx.Model(&TurnModel{}).Where("session_id = ? AND completed_at IS NOT NULL", sessionID).Count(&completedCount).Error; err != nil {
+				return err
+			}
+			if completedCount >= int64(s.limit) {
+				return fmt.Errorf("%w: current session's context is full, please create a new session", conversationstore.ErrTurnLimitReached)
+			}
+			turn = TurnModel{SessionID: sessionID, CreatedAt: time.Now()}
+			if err := tx.Create(&turn).Error; err != nil {
+				return err
+			}
+		case 1:
+			turn = active[0]
+		default:
+			return fmt.Errorf("session %q has multiple active turns; use AddHistoryToTurn", sessionID)
+		}
+		return insertMessages(tx, turn.ID, messages)
+	})
+}
+
+func insertMessages(tx *gorm.DB, turnID uint64, messages []*ai.Message) error {
+	var last MessageModel
+	err := tx.Where("turn_id = ?", turnID).Order("sequence DESC").First(&last).Error
+	nextSequence := uint64(0)
+	if err == nil {
+		nextSequence = last.Sequence + 1
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	for _, message := range messages {
+		if message == nil || !supportedRole(message.Role) {
+			continue
+		}
+		payload, err := encodeMessage(message)
+		if err != nil {
+			return fmt.Errorf("failed to encode message: %w", err)
+		}
+		stored := MessageModel{TurnID: turnID, Sequence: nextSequence, Payload: payload, CreatedAt: time.Now()}
+		if err := tx.Create(&stored).Error; err != nil {
+			return err
+		}
+		nextSequence++
+	}
+	return nil
+}
+
+func (s *GormStore) IsEmpty(ctx context.Context, sessionID string) (bool, error) {
+	turnID, err := s.activeTurnID(ctx, sessionID)
+	if err != nil {
+		if errors.Is(err, conversationstore.ErrNoActiveTurn) {
+			return true, nil
+		}
+		return false, err
+	}
+	if _, err := s.IsTurnEmpty(ctx, sessionID, turnID); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
+func (s *GormStore) WindowMemory(ctx context.Context, sessionID string) ([]*ai.Message, error) {
+	turnID, err := s.activeTurnID(ctx, sessionID)
+	if err != nil {
+		if errors.Is(err, conversationstore.ErrNoActiveTurn) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return s.WindowMemoryForTurn(ctx, sessionID, turnID)
+}
+
+func (s *GormStore) NextTurn(ctx context.Context, sessionID string) error {
+	turnID, err := s.activeTurnID(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	return s.NextTurnForTurn(ctx, sessionID, turnID)
+}
+
+func (s *GormStore) activeTurnID(ctx context.Context, sessionID string) (uint64, error) {
+	var turns []TurnModel
+	err := s.db.WithContext(normalizeContext(ctx)).Where("session_id = ? AND completed_at IS NULL", sessionID).Order("id ASC").Find(&turns).Error
+	if err != nil {
+		return 0, err
+	}
+	if len(turns) == 0 {
+		return 0, conversationstore.ErrNoActiveTurn
+	}
+	if len(turns) > 1 {
+		return 0, fmt.Errorf("session %q has multiple active turns", sessionID)
+	}
+	return turns[0].ID, nil
+}
+
+func readTurnMessages(db *gorm.DB, ctx context.Context, turnID uint64) ([]*ai.Message, error) {
 	var models []MessageModel
-	if err := s.db.WithContext(normalizeContext(ctx)).Where("turn_id = ?", turnID).Order("sequence ASC").Find(&models).Error; err != nil {
+	if err := db.WithContext(normalizeContext(ctx)).Where("turn_id = ?", turnID).Order("sequence ASC").Find(&models).Error; err != nil {
 		return nil, err
 	}
 	return decodeGrouped(models)

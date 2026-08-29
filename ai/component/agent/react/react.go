@@ -20,6 +20,7 @@ package react
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"dubbo-admin-ai/component/agent"
 	"dubbo-admin-ai/component/agent/fallback"
@@ -33,6 +34,8 @@ import (
 type contextKey string
 
 const sessionIDContextKey contextKey = "session"
+
+const persistenceTimeout = 30 * time.Second
 
 // ReActAgent is a ReAct-strategy agent: each interaction runs the configured
 // stages (reasonAct then observe) in a bounded loop until the observe stage
@@ -94,6 +97,7 @@ func (ra *ReActAgent) Interact(parent context.Context, input *schema.UserInput, 
 			chans.Close()
 			return
 		}
+		defer s.cancelPersistence()
 
 		if err := runLoop(ctx, s, ra.maxIterations, ra.buildSteps(chans)...); err != nil {
 			chans.ErrorChan <- err
@@ -101,7 +105,7 @@ func (ra *ReActAgent) Interact(parent context.Context, input *schema.UserInput, 
 			return
 		}
 
-		if err := ra.messageStore.NextTurn(s.persistenceContext(ctx), sessionID); err != nil {
+		if err := ra.messageStore.NextTurnForTurn(s.persistenceContext(ctx), sessionID, s.TurnID); err != nil {
 			chans.ErrorChan <- fmt.Errorf("failed to complete turn: %w", err)
 			chans.Close()
 			return
@@ -134,17 +138,24 @@ func (ra *ReActAgent) newInteraction(parent context.Context, input *schema.UserI
 	// Record the user's message as plain text. The session id travels via
 	// context, so there is no need to wrap the input in a
 	// JSON envelope the model would otherwise have to read through.
-	if err := ra.messageStore.AddHistory(parent, sessionID, ai.NewUserMessage(ai.NewTextPart(input.Content))); err != nil {
+	turnID, err := ra.messageStore.BeginTurn(parent, sessionID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to begin turn: %w", err)
+	}
+	if err := ra.messageStore.AddHistoryToTurn(parent, sessionID, turnID, ai.NewUserMessage(ai.NewTextPart(input.Content))); err != nil {
 		return nil, nil, fmt.Errorf("failed to record user message: %w", err)
 	}
 
 	ctx := context.WithValue(parent, sessionIDContextKey, sessionID)
 	ctx = withCurrentPageContext(ctx, input.Context)
+	persistCtx, persistCancel := context.WithTimeout(context.WithoutCancel(parent), persistenceTimeout)
 	s := &state{
-		Input:      input,
-		Session:    sessionID,
-		persistCtx: context.WithoutCancel(parent),
-		Usage:      &ai.GenerationUsage{},
+		Input:         input,
+		Session:       sessionID,
+		TurnID:        turnID,
+		persistCtx:    persistCtx,
+		persistCancel: persistCancel,
+		Usage:         &ai.GenerationUsage{},
 	}
 	return ctx, s, nil
 }

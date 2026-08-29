@@ -58,20 +58,15 @@ func getAllMemoryBySession(rt *runtime.Runtime, messageStore conversationstore.M
 				return ToolOutput{}, fmt.Errorf("sessionID is required")
 			}
 
-			empty, err := messageStore.IsEmpty(ctx, input.SessionID)
+			history, err := messageStore.AllMemory(ctx, input.SessionID)
 			if err != nil {
-				return ToolOutput{}, fmt.Errorf("failed to inspect conversation history: %w", err)
+				return ToolOutput{}, fmt.Errorf("failed to load conversation history: %w", err)
 			}
-			if empty {
+			if len(history) == 0 {
 				return ToolOutput{
 					ToolName: GetAllMemoryTool,
 					Summary:  "No memory available",
 				}, nil
-			}
-
-			history, err := messageStore.AllMemory(ctx, input.SessionID)
-			if err != nil {
-				return ToolOutput{}, fmt.Errorf("failed to load conversation history: %w", err)
 			}
 			return ToolOutput{
 				ToolName: GetAllMemoryTool,

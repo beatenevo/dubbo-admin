@@ -19,6 +19,7 @@ package agent
 
 import (
 	"context"
+	"sync"
 
 	"dubbo-admin-ai/schema"
 )
@@ -31,7 +32,8 @@ type Agent interface {
 // UserRespChan streams user-facing text/progress and the final answer;
 // ErrorChan surfaces failures. A fresh Channels is created per interaction.
 type Channels struct {
-	closed    bool
+	closeOnce sync.Once
+	done      chan struct{}
 	nextIndex int
 
 	UserRespChan chan *schema.StreamFeedback
@@ -40,7 +42,7 @@ type Channels struct {
 
 func NewChannels(bufferSize int) *Channels {
 	return &Channels{
-		closed:       false,
+		done:         make(chan struct{}),
 		UserRespChan: make(chan *schema.StreamFeedback, bufferSize),
 		ErrorChan:    make(chan error, bufferSize),
 	}
@@ -49,11 +51,31 @@ func NewChannels(bufferSize int) *Channels {
 // Close marks the Channels as finished without tearing down the underlying
 // channels, so the consumer can drain any buffered messages.
 func (chans *Channels) Close() {
-	chans.closed = true
+	if chans == nil {
+		return
+	}
+	chans.closeOnce.Do(func() { close(chans.done) })
 }
 
 func (chans *Channels) Closed() bool {
-	return chans.closed
+	if chans == nil {
+		return true
+	}
+	select {
+	case <-chans.done:
+		return true
+	default:
+		return false
+	}
+}
+
+// Done returns a channel that is closed when the interaction has finished.
+// The output channels remain open so consumers can drain buffered events.
+func (chans *Channels) Done() <-chan struct{} {
+	if chans == nil {
+		return nil
+	}
+	return chans.done
 }
 
 // Send assigns the next content-block index to the feedback and forwards it to

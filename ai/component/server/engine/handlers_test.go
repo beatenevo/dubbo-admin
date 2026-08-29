@@ -21,8 +21,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,6 +39,15 @@ import (
 
 type captureAgent struct {
 	input *schema.UserInput
+}
+
+type failingSessionStore struct {
+	conversationstore.Store
+	err error
+}
+
+func (s *failingSessionStore) Get(context.Context, string) (*conversationstore.Session, error) {
+	return nil, s.err
 }
 
 func (a *captureAgent) Interact(_ context.Context, input *schema.UserInput, _ string) *agent.Channels {
@@ -118,5 +129,30 @@ func TestStreamChatContextContract(t *testing.T) {
 				t.Fatalf("agent received unsanitized context: %#v", capturedAgent.input.Context.State.Filters)
 			}
 		})
+	}
+}
+
+func TestGetSessionHidesStoreError(t *testing.T) {
+	backendError := errors.New("dial tcp database.internal:3306")
+	store := &failingSessionStore{Store: memorystore.NewMemoryStore(), err: backendError}
+	manager := session.NewManager(store)
+	defer manager.Close()
+	handler := NewAgentHandler(&captureAgent{}, manager)
+
+	response := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(response)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/ai/sessions/session_test", nil)
+	c.Params = gin.Params{{Key: "sessionId", Value: "session_test"}}
+	handler.GetSession(c)
+
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusInternalServerError)
+	}
+	body := response.Body.String()
+	if strings.Contains(body, backendError.Error()) {
+		t.Fatalf("response exposes backend error: %s", body)
+	}
+	if !strings.Contains(body, "Session storage unavailable") {
+		t.Fatalf("response = %s, want storage error", body)
 	}
 }
