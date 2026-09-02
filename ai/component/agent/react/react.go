@@ -19,11 +19,13 @@ package react
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"dubbo-admin-ai/component/agent"
 	"dubbo-admin-ai/component/agent/fallback"
+	rt "dubbo-admin-ai/runtime"
 	"dubbo-admin-ai/schema"
 	conversationstore "dubbo-admin-ai/store"
 
@@ -97,7 +99,15 @@ func (ra *ReActAgent) Interact(parent context.Context, input *schema.UserInput, 
 			chans.Close()
 			return
 		}
-		defer s.cancelPersistence()
+		completed := false
+		defer func() {
+			if !completed {
+				if abortErr := ra.abortTurn(ctx, sessionID, s.TurnID); abortErr != nil && !errors.Is(abortErr, conversationstore.ErrTurnNotFound) {
+					rt.GetLogger().Error("Failed to abort AI interaction turn", "session_id", sessionID, "turn_id", s.TurnID, "error", abortErr)
+				}
+			}
+			s.cancelPersistence()
+		}()
 
 		if err := runLoop(ctx, s, ra.maxIterations, ra.buildSteps(chans)...); err != nil {
 			chans.ErrorChan <- err
@@ -110,6 +120,7 @@ func (ra *ReActAgent) Interact(parent context.Context, input *schema.UserInput, 
 			chans.Close()
 			return
 		}
+		completed = true
 
 		// Emit the final answer for the SSE layer; it carries the accumulated
 		// usage that the MessageDelta needs. Fall back to an empty observation
@@ -142,13 +153,18 @@ func (ra *ReActAgent) newInteraction(parent context.Context, input *schema.UserI
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to begin turn: %w", err)
 	}
+	persistCtx, persistCancel := context.WithTimeout(context.WithoutCancel(parent), persistenceTimeout)
 	if err := ra.messageStore.AddHistoryToTurn(parent, sessionID, turnID, ai.NewUserMessage(ai.NewTextPart(input.Content))); err != nil {
+		if abortErr := ra.abortTurn(parent, sessionID, turnID); abortErr != nil && !errors.Is(abortErr, conversationstore.ErrTurnNotFound) {
+			persistCancel()
+			return nil, nil, fmt.Errorf("failed to record user message: %w (also failed to abort turn: %v)", err, abortErr)
+		}
+		persistCancel()
 		return nil, nil, fmt.Errorf("failed to record user message: %w", err)
 	}
 
 	ctx := context.WithValue(parent, sessionIDContextKey, sessionID)
 	ctx = withCurrentPageContext(ctx, input.Context)
-	persistCtx, persistCancel := context.WithTimeout(context.WithoutCancel(parent), persistenceTimeout)
 	s := &state{
 		Input:         input,
 		Session:       sessionID,
@@ -158,4 +174,10 @@ func (ra *ReActAgent) newInteraction(parent context.Context, input *schema.UserI
 		Usage:         &ai.GenerationUsage{},
 	}
 	return ctx, s, nil
+}
+
+func (ra *ReActAgent) abortTurn(parent context.Context, sessionID string, turnID uint64) error {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(parent), persistenceTimeout)
+	defer cancel()
+	return ra.messageStore.AbortTurnForTurn(cleanupCtx, sessionID, turnID)
 }

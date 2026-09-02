@@ -19,6 +19,7 @@ package react
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -30,6 +31,24 @@ import (
 	"github.com/firebase/genkit/go/ai"
 	"github.com/firebase/genkit/go/genkit"
 )
+
+type failingUserWriteStore struct {
+	conversationstore.Store
+	abortCalled chan struct{}
+}
+
+func (s *failingUserWriteStore) AddHistoryToTurn(context.Context, string, uint64, ...*ai.Message) error {
+	return errors.New("user message write failed")
+}
+
+func (s *failingUserWriteStore) AbortTurnForTurn(ctx context.Context, sessionID string, turnID uint64) error {
+	select {
+	case <-s.abortCalled:
+	default:
+		close(s.abortCalled)
+	}
+	return s.Store.AbortTurnForTurn(ctx, sessionID, turnID)
+}
 
 type recordingStore struct {
 	conversationstore.Store
@@ -96,6 +115,32 @@ func TestGeneratedMessageUsesDetachedPersistenceContext(t *testing.T) {
 	}
 	if store.addContexts[1].Err() != nil {
 		t.Fatalf("generated message context error = %v, want nil", store.addContexts[1].Err())
+	}
+}
+
+func TestUserWriteFailureAbortsStartedTurn(t *testing.T) {
+	backing := memorystore.NewMemoryStore(1)
+	now := time.Now()
+	if err := backing.Create(context.Background(), &conversationstore.Session{
+		ID:        "abort-user-write-session",
+		CreatedAt: now,
+		UpdatedAt: now,
+		Status:    "active",
+	}); err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	store := &failingUserWriteStore{Store: backing, abortCalled: make(chan struct{})}
+	ra := &ReActAgent{messageStore: store}
+	if _, _, err := ra.newInteraction(context.Background(), &schema.UserInput{Content: "hello"}, "abort-user-write-session"); err == nil {
+		t.Fatal("newInteraction() error = nil, want user write failure")
+	}
+	select {
+	case <-store.abortCalled:
+	case <-time.After(time.Second):
+		t.Fatal("AbortTurnForTurn was not called")
+	}
+	if messages, err := backing.AllMemory(context.Background(), "abort-user-write-session"); err != nil || len(messages) != 0 {
+		t.Fatalf("AllMemory() after failed user write = %#v, error = %v, want empty history", messages, err)
 	}
 }
 

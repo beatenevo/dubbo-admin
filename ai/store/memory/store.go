@@ -340,6 +340,26 @@ func (m *MemoryStore) NextTurnForTurn(ctx context.Context, sessionID string, tur
 	return nil
 }
 
+// AbortTurnForTurn removes an unfinished interaction and its messages.
+// Aborted Turns do not count toward the configured conversation limit.
+func (m *MemoryStore) AbortTurnForTurn(ctx context.Context, sessionID string, turnID uint64) error {
+	if err := checkContext(ctx); err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	history := m.history[sessionID]
+	if history == nil || history.active == nil {
+		return conversationstore.ErrTurnNotFound
+	}
+	if _, ok := history.active[turnID]; !ok {
+		return conversationstore.ErrTurnNotFound
+	}
+	delete(history.active, turnID)
+	return nil
+}
+
 // AddHistory is retained for callers of the pre-Store API. Production code
 // must use BeginTurn and AddHistoryToTurn so concurrent interactions cannot
 // share an active Turn.

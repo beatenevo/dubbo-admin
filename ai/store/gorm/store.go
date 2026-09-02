@@ -414,6 +414,29 @@ func (s *GormStore) NextTurnForTurn(ctx context.Context, sessionID string, turnI
 	})
 }
 
+// AbortTurnForTurn removes an unfinished interaction and its messages in one
+// transaction. Aborted Turns do not count toward the configured limit.
+func (s *GormStore) AbortTurnForTurn(ctx context.Context, sessionID string, turnID uint64) error {
+	if err := s.checkContext(ctx); err != nil {
+		return err
+	}
+	return s.db.WithContext(normalizeContext(ctx)).Transaction(func(tx *gorm.DB) error {
+		if _, err := s.findSession(tx, sessionID, true); err != nil {
+			return err
+		}
+		var turn TurnModel
+		if err := tx.Where("id = ? AND session_id = ? AND completed_at IS NULL", turnID, sessionID).First(&turn).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+			return conversationstore.ErrTurnNotFound
+		} else if err != nil {
+			return err
+		}
+		if err := tx.Where("turn_id = ?", turnID).Delete(&MessageModel{}).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&turn).Error
+	})
+}
+
 // AddHistory is retained for callers of the pre-Store API. Production code
 // must use BeginTurn and AddHistoryToTurn to isolate concurrent interactions.
 func (s *GormStore) AddHistory(ctx context.Context, sessionID string, messages ...*ai.Message) error {

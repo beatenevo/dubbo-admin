@@ -156,6 +156,32 @@ func RunStoreContractTests(t *testing.T, newStore func() conversationstore.Store
 		}
 	})
 
+	t.Run("aborting a turn removes its partial history", func(t *testing.T) {
+		ctx := context.Background()
+		s := newStore()
+		now := time.Now()
+		session := &conversationstore.Session{ID: "abort-turn-session", CreatedAt: now, UpdatedAt: now, Status: "active"}
+		if err := s.Create(ctx, session); err != nil {
+			t.Fatalf("Create() error = %v", err)
+		}
+		turnID := begin(t, s, ctx, session.ID)
+		if err := s.AddHistoryToTurn(ctx, session.ID, turnID, ai.NewUserTextMessage("partial")); err != nil {
+			t.Fatalf("AddHistoryToTurn() error = %v", err)
+		}
+		if err := s.AbortTurnForTurn(ctx, session.ID, turnID); err != nil {
+			t.Fatalf("AbortTurnForTurn() error = %v", err)
+		}
+		if _, err := s.WindowMemoryForTurn(ctx, session.ID, turnID); !errors.Is(err, conversationstore.ErrTurnNotFound) {
+			t.Fatalf("WindowMemoryForTurn() after abort error = %v, want ErrTurnNotFound", err)
+		}
+		if messages, err := s.AllMemory(ctx, session.ID); err != nil || len(messages) != 0 {
+			t.Fatalf("AllMemory() after abort = %#v, error = %v, want empty history", messages, err)
+		}
+		if nextID, err := s.BeginTurn(ctx, session.ID); err != nil || nextID == 0 {
+			t.Fatalf("BeginTurn() after abort = %d, error = %v", nextID, err)
+		}
+	})
+
 	t.Run("returned messages are snapshots", func(t *testing.T) {
 		ctx := context.Background()
 		s := newStore()

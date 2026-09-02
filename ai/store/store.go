@@ -42,6 +42,7 @@ type MessageStore interface {
 	WindowMemoryForTurn(ctx context.Context, sessionID string, turnID uint64) ([]*ai.Message, error)
 	AllMemory(ctx context.Context, sessionID string) ([]*ai.Message, error)
 	NextTurnForTurn(ctx context.Context, sessionID string, turnID uint64) error
+	AbortTurnForTurn(ctx context.Context, sessionID string, turnID uint64) error
 }
 
 // Store combines the Session and conversation history contracts.
