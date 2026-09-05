@@ -20,12 +20,11 @@ package react
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"dubbo-admin-ai/component/agent"
+	"dubbo-admin-ai/component/memory"
 	toolEngine "dubbo-admin-ai/component/tools/engine"
 	"dubbo-admin-ai/runtime"
 	"dubbo-admin-ai/schema"
@@ -33,266 +32,203 @@ import (
 	"github.com/firebase/genkit/go/ai"
 )
 
-// buildSteps materializes the step closures for one interaction, binding the
-// per-interaction channels so progress/streaming reaches the right consumer.
-func (ra *ReActAgent) buildSteps(chans *agent.Channels) []step {
-	steps := make([]step, 0, len(ra.stages))
-	for _, st := range ra.stages {
-		switch st.kind {
-		case flowReasonAct:
-			steps = append(steps, ra.reasonActStep(st.prompt, chans, st.timeout))
-		case flowObserve:
-			steps = append(steps, ra.observeStep(st.prompt, chans, st.timeout))
-		}
+// fallbackAnswer is streamed when the model returns no text on the forced final
+// iteration, so an interaction always ends with a user-visible reply instead of
+// bare stream markers.
+const fallbackAnswer = "抱歉，我暂时无法生成回答，请稍后再试。"
+
+// run drives the reason-and-act loop for one interaction. Each iteration is a
+// single model call: with native function calling the model either requests
+// tools (whose results are fed back as context for the next iteration) or
+// answers directly — a tool-free response IS the final answer, so no separate
+// "observe" reasoning step is needed to decide when to stop. The last allowed
+// iteration uses the tool-less answer prompt so the loop always terminates with
+// a real answer rather than an exhausted-budget silence.
+//
+// run streams the answer itself and returns the interaction's accumulated token
+// usage; the caller emits the final usage marker and closes the channels.
+func (ra *ReActAgent) run(ctx context.Context, chans *agent.Channels) (*ai.GenerationUsage, error) {
+	sessionID, err := sessionIDFromCtx(ctx)
+	if err != nil {
+		return nil, err
 	}
-	return steps
-}
-
-// sessionIDFromCtx pulls only the session identity out of ctx. Conversation
-// data is owned by the injected MessageStore rather than context values.
-func sessionIDFromCtx(ctx context.Context) (string, error) {
-	sessionID, ok := ctx.Value(sessionIDContextKey).(string)
-	if !ok || sessionID == "" {
-		return "", fmt.Errorf("session id not found in context")
-	}
-	return sessionID, nil
-}
-
-// reasonActStep merges the old think + act stages: one model call reasons about
-// the request and, via native function calling, either issues tool requests
-// (which it executes) or issues none (answering directly). The observe stage
-// then composes the reply, so this step never terminates the loop.
-func (ra *ReActAgent) reasonActStep(prompt ai.Prompt, chans *agent.Channels, timeout time.Duration) step {
-	return func(ctx context.Context, s *state) (bool, error) {
-		emitStageProgress(chans, flowReasonAct, true)
-		defer emitStageProgress(chans, flowReasonAct, false)
-
-		sessionID, err := sessionIDFromCtx(ctx)
+	turnID, _ := ctx.Value(turnIDContextKey).(uint64)
+	var history *memory.HistoryMemory
+	if ra.messageStore == nil {
+		history, _, err = historyFromCtx(ctx)
 		if err != nil {
-			return false, err
+			return nil, err
 		}
-		empty, err := ra.messageStore.IsTurnEmpty(ctx, sessionID, s.TurnID)
+		if history.IsEmpty(sessionID) {
+			return nil, fmt.Errorf("history is empty")
+		}
+	} else {
+		empty, err := ra.messageStore.IsTurnEmpty(ctx, sessionID, turnID)
 		if err != nil {
-			return false, fmt.Errorf("failed to inspect history: %w", err)
+			return nil, fmt.Errorf("failed to inspect history: %w", err)
 		}
 		if empty {
-			return false, fmt.Errorf("history is empty")
+			return nil, fmt.Errorf("history is empty")
 		}
-		history, err := ra.messageStore.WindowMemoryForTurn(ctx, sessionID, s.TurnID)
-		if err != nil {
-			return false, fmt.Errorf("failed to load history: %w", err)
-		}
-		messages, err := injectCurrentPageContext(ctx, history)
-		if err != nil {
-			return false, err
+	}
+
+	usage := &ai.GenerationUsage{}
+	for i := 0; i < ra.maxIterations; i++ {
+		// The final iteration must answer: drop the tools so the model can only
+		// synthesize from what it has already gathered.
+		forceAnswer := i == ra.maxIterations-1
+		prompt := ra.actPrompt
+		if forceAnswer {
+			prompt = ra.answerPrompt
 		}
 
-		// Only the model call is bound by the stage timeout; tool execution below
-		// runs on the original ctx so a slow reasoning step can't starve the tools
-		// it just asked for (which would otherwise fail hard on the shared deadline).
-		lctx, cancel := withTimeout(ctx, timeout)
+		// Only the model call is bound by the per-call timeout; tool execution
+		// below runs on the original ctx so a slow reasoning step can't starve the
+		// tools it just asked for on a shared deadline.
+		lctx, cancel := withTimeout(ctx, ra.callTimeout)
+		var messages []*ai.Message
+		if ra.messageStore != nil {
+			messages, err = ra.messageStore.WindowMemoryForTurn(ctx, sessionID, turnID)
+		} else {
+			messages = history.WindowMemory(sessionID)
+		}
+		if err != nil {
+			cancel()
+			return usage, fmt.Errorf("failed to load conversation history: %w", err)
+		}
 		resp, err := prompt.Execute(lctx, ai.WithMessages(messages...))
 		cancel()
 		if err != nil {
-			return false, fmt.Errorf("failed to execute reasonAct prompt: %w", err)
+			return usage, fmt.Errorf("failed to execute react prompt: %w", err)
 		}
-		s.addUsage(resp.Usage)
+		schema.AccumulateUsage(usage, resp.Usage)
 
-		toolReqs := resp.ToolRequests()
-		runtime.GetLogger().Info("tool requests:", "req", toolReqs)
-
-		// No tools needed: the model answered directly. Record its reasoning so
-		// the observe stage can build on it, and leave tool outputs empty.
-		if len(toolReqs) == 0 {
-			if text := resp.Text(); text != "" {
-				if err := ra.messageStore.AddHistoryToTurn(s.persistenceContext(ctx), sessionID, s.TurnID, ai.NewMessage(ai.RoleModel, nil, ai.NewTextPart(text))); err != nil {
-					return false, fmt.Errorf("failed to record model message: %w", err)
+		if !forceAnswer {
+			if reqs := resp.ToolRequests(); len(reqs) > 0 {
+				runtime.GetLogger().Debug("react: model requested tools", "count", len(reqs))
+				agent.EmitProgress(chans, "🔍 分析问题并调用工具中...\n")
+				if err := ra.execTools(ctx, history, sessionID, turnID, reqs); err != nil {
+					return usage, err
 				}
+				continue
 			}
-			s.Tools = &schema.ToolOutputs{UsageInfo: &ai.GenerationUsage{}}
-			return false, nil
 		}
 
-		var parts []*ai.Part
-		actOuts := &schema.ToolOutputs{UsageInfo: &ai.GenerationUsage{}}
-		for _, req := range toolReqs {
-			// Each tool runs under its own timeout (per-tool override, else the
-			// shared default), independent of the model call's budget above.
-			tctx, cancel := withTimeout(ctx, ra.toolTimeouts.For(req.Name))
-			output, err := toolEngine.Call(tctx, ra.registry, req.Name, req.Input)
-			cancel()
-			if err != nil {
-				// Degrade instead of aborting: record the failure as a tool output
-				// so the observe stage can still compose an answer (or explain the
-				// gap) from whatever other tools returned.
-				runtime.GetLogger().Warn("tool call failed, continuing with degraded context",
-					"tool", req.Name, "error", err)
-				output = toolEngine.ToolOutput{
-					ToolName: req.Name,
-					Summary:  fmt.Sprintf("tool %q failed: %v", req.Name, err),
-				}
+		// A tool-free response IS the final answer — but an empty response has
+		// nothing to stream. While iterations remain, retry rather than finish on
+		// silence; on the forced last iteration substitute an explicit fallback so
+		// the loop always terminates with a real reply.
+		answer := resp.Text()
+		if answer == "" {
+			if !forceAnswer {
+				runtime.GetLogger().Warn("react: empty model response, retrying", "iteration", i)
+				continue
 			}
-			outputJson, err := json.Marshal(output)
-			if err != nil {
-				return false, fmt.Errorf("failed to marshal output: %w", err)
-			}
-			parts = append(parts, ai.NewJSONPart(string(outputJson)))
-			actOuts.Add(&output)
+			runtime.GetLogger().Warn("react: empty forced answer, using fallback")
+			answer = fallbackAnswer
 		}
-		runtime.GetLogger().Info("act out:", "out", actOuts)
-		// ai.RoleTool's messages will be ignored by ai.WithMessages
-		if err := ra.messageStore.AddHistoryToTurn(s.persistenceContext(ctx), sessionID, s.TurnID, ai.NewMessage(ai.RoleModel, nil, parts...)); err != nil {
-			return false, fmt.Errorf("failed to record model message: %w", err)
+
+		if err := ra.finish(ctx, chans, history, sessionID, turnID, answer); err != nil {
+			return usage, err
 		}
-		s.Tools = actOuts
-		return false, nil
+		return usage, nil
 	}
+
+	// Unreachable: the final iteration always answers and returns above.
+	return usage, nil
 }
 
-func (ra *ReActAgent) observeStep(prompt ai.Prompt, chans *agent.Channels, timeout time.Duration) step {
-	return func(ctx context.Context, s *state) (bool, error) {
-		emitStageProgress(chans, flowObserve, true)
-		defer emitStageProgress(chans, flowObserve, false)
-
-		sessionID, err := sessionIDFromCtx(ctx)
+// execTools runs every requested tool under its own timeout and records the
+// results into history as a model message so the next iteration can read them.
+// A failed tool degrades (its error is recorded as the tool's output) rather
+// than aborting the interaction, so the model can still answer from whatever
+// other tools returned.
+func (ra *ReActAgent) execTools(ctx context.Context, history *memory.HistoryMemory, sessionID string, turnID uint64, reqs []*ai.ToolRequest) error {
+	var parts []*ai.Part
+	for _, req := range reqs {
+		tctx, cancel := withTimeout(ctx, ra.toolTimeouts.For(req.Name))
+		output, err := toolEngine.Call(tctx, ra.registry, req.Name, req.Input)
+		cancel()
 		if err != nil {
-			return false, err
-		}
-		empty, err := ra.messageStore.IsTurnEmpty(ctx, sessionID, s.TurnID)
-		if err != nil {
-			return false, fmt.Errorf("failed to inspect history: %w", err)
-		}
-		if empty {
-			return false, fmt.Errorf("history is empty")
-		}
-		history, err := ra.messageStore.WindowMemoryForTurn(ctx, sessionID, s.TurnID)
-		if err != nil {
-			return false, fmt.Errorf("failed to load history: %w", err)
-		}
-		messages, err := injectCurrentPageContext(ctx, history)
-		if err != nil {
-			return false, err
-		}
-
-		obsCtx, cancel := withTimeout(ctx, timeout)
-		defer cancel()
-
-		var observation *schema.Observation
-		resp, err := prompt.Execute(obsCtx, ai.WithMessages(messages...))
-		switch {
-		case err != nil && (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)):
-			runtime.GetLogger().Warn("Observe stage timeout, returning fallback response", "timeout", timeout)
-			fb := generateFallbackObservation(s)
-			observation = &fb
-		case err != nil:
-			return false, fmt.Errorf("failed to execute observe prompt: %w", err)
-		default:
-			// The model responded and consumed tokens regardless of whether its
-			// output parses, so account for usage before attempting the parse.
-			s.addUsage(resp.Usage)
-			observation, err = ra.fallback.ParseObservation(resp)
-			if err != nil {
-				runtime.GetLogger().Warn("Failed to parse observation, returning fallback", "error", err)
-				fb := generateFallbackObservation(s)
-				observation = &fb
+			runtime.GetLogger().Warn("tool call failed, continuing with degraded context",
+				"tool", req.Name, "error", err)
+			output = toolEngine.ToolOutput{
+				ToolName: req.Name,
+				Summary:  fmt.Sprintf("tool %q failed: %v", req.Name, err),
 			}
 		}
-		runtime.GetLogger().Info("Observe out:", "out", observation)
-
-		if err := ra.messageStore.AddHistoryToTurn(s.persistenceContext(ctx), sessionID, s.TurnID, ra.fallback.MarshalObservation(observation)); err != nil {
-			return false, fmt.Errorf("failed to record observation: %w", err)
+		outputJSON, err := json.Marshal(output)
+		if err != nil {
+			return fmt.Errorf("failed to marshal output: %w", err)
 		}
-		observation.UsageInfo = s.Usage
-		s.Observe = observation
-
-		// Stream the observation to the user, preserving the old emission order.
-		emitObservation(chans, observation)
-
-		return !observation.Heartbeat && observation.FinalAnswer != "", nil
+		parts = append(parts, ai.NewJSONPart(string(outputJSON)))
 	}
+	runtime.GetLogger().Debug("react: recorded tool results", "count", len(parts))
+	// ai.RoleTool messages are ignored by ai.WithMessages, so tool results are
+	// recorded as a model message.
+	message := ai.NewMessage(ai.RoleModel, nil, parts...)
+	if ra.messageStore != nil {
+		if err := ra.messageStore.AddHistoryToTurn(persistenceContext(ctx), sessionID, turnID, message); err != nil {
+			return fmt.Errorf("failed to record tool output: %w", err)
+		}
+	} else {
+		history.AddHistory(sessionID, message)
+	}
+	return nil
 }
 
-// emitObservation streams the observation's user-facing text and closes the
-// content block. Only FinalAnswer is user-facing; Summary is an internal status
-// line (see agentObserve.txt's Output Contract) and is deliberately NOT streamed
-// — emitting it would prepend an internal status to every answer. Progress is
-// already conveyed by the stage markers (emitStageProgress).
-func emitObservation(chans *agent.Channels, obs *schema.Observation) {
+// finish records the answer into history and streams it to the user, closing the
+// content block exactly once.
+
+func (ra *ReActAgent) finish(ctx context.Context, chans *agent.Channels, history *memory.HistoryMemory, sessionID string, turnID uint64, answer string) error {
+	if answer != "" {
+		message := ai.NewMessage(ai.RoleModel, nil, ai.NewTextPart(answer))
+		if ra.messageStore != nil {
+			if err := ra.messageStore.AddHistoryToTurn(persistenceContext(ctx), sessionID, turnID, message); err != nil {
+				return fmt.Errorf("failed to persist final answer: %w", err)
+			}
+		} else {
+			history.AddHistory(sessionID, message)
+		}
+	}
 	if chans == nil {
-		return
+		return nil
 	}
-	if obs.FinalAnswer != "" {
-		chans.Send(schema.NewStreamFeedback(obs.FinalAnswer + "\n"))
+	if answer != "" {
+		chans.Send(schema.NewStreamFeedback(answer + "\n"))
 	}
 	chans.Send(schema.StreamEnd())
+	return nil
 }
 
-// generateFallbackObservation creates a fallback observation when the observe
-// stage times out or its output can't be parsed. It prefers concrete tool
-// outputs, then the think stage's thought, matching the old switch behaviour.
-func generateFallbackObservation(s *state) schema.Observation {
-	fb := schema.Observation{
-		Heartbeat:   false,
-		FinalAnswer: "",
-		Summary:     "Generate response based on available context",
-		Evidence:    "Timeout - using available context",
+// historyFromCtx pulls the session-scoped history out of ctx.
+func historyFromCtx(ctx context.Context) (*memory.HistoryMemory, string, error) {
+	history, ok := ctx.Value(memory.ChatHistoryKey).(*memory.HistoryMemory)
+	if !ok {
+		return nil, "", fmt.Errorf("failed to get history from context")
 	}
-
-	switch {
-	case s.Tools != nil && len(s.Tools.Outputs) > 0:
-		fb.FinalAnswer = generateResponseFromToolOutputs(s.Tools.Outputs)
-	default:
-		fb.FinalAnswer = "I apologize, but I need more time to process your request. Based on the available context, I cannot provide a complete answer at this moment."
+	sessionID, ok := ctx.Value(memory.SessionIDKey).(string)
+	if !ok || sessionID == "" {
+		return nil, "", fmt.Errorf("session id not found in context")
 	}
-
-	return fb
+	return history, sessionID, nil
 }
 
-// generateResponseFromToolOutputs generates a response from tool outputs
-func generateResponseFromToolOutputs(outputs []toolEngine.ToolOutput) string {
-	if len(outputs) == 0 {
-		return "No tool results available to answer your question."
+func sessionIDFromCtx(ctx context.Context) (string, error) {
+	if sessionID, ok := ctx.Value(sessionIDContextKey).(string); ok && sessionID != "" {
+		return sessionID, nil
 	}
-
-	var resultParts []string
-	for _, output := range outputs {
-		if output.Summary != "" {
-			resultParts = append(resultParts, output.Summary)
-		}
+	if sessionID, ok := ctx.Value(memory.SessionIDKey).(string); ok && sessionID != "" {
+		return sessionID, nil
 	}
-
-	if len(resultParts) > 0 {
-		return fmt.Sprintf("Tool execution results: %s", strings.Join(resultParts, "; "))
-	}
-	return "Tool execution completed but no detailed results available."
+	return "", fmt.Errorf("session id not found in context")
 }
 
-// emitStageProgress renders the react-specific progress line for a stage
-// boundary and streams it via the generic agent primitive.
-func emitStageProgress(chans *agent.Channels, stageName string, started bool) {
-	agent.EmitProgress(chans, stageProgressText(stageName, started))
-}
-
-func stageProgressText(stageName string, started bool) string {
-	if started {
-		switch stageName {
-		case flowReasonAct:
-			return "🔍 分析问题并调用工具中...\n"
-		case flowObserve:
-			return "🧠 整理结论中...\n"
-		default:
-			return fmt.Sprintf("⏳ %s 阶段处理中...\n", stageName)
-		}
+func persistenceContext(ctx context.Context) context.Context {
+	if state, ok := ctx.Value(persistenceContextKey).(context.Context); ok && state != nil {
+		return state
 	}
-
-	switch stageName {
-	case flowReasonAct:
-		return "✅ 分析与工具调用完成。\n"
-	case flowObserve:
-		return "✅ 结论整理完成。\n"
-	default:
-		return fmt.Sprintf("✅ %s 阶段完成。\n", stageName)
-	}
+	return ctx
 }
 
 // withTimeout wraps ctx with a deadline when timeout > 0; otherwise it returns
